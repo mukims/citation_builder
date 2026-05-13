@@ -10,12 +10,10 @@ except ImportError:
     sys.exit(1)
 
 from agent_graph import process_event
+from agent6_manual_ingestor import ManualPDFHandler, PULLED_PDFS_DIR
 
 COOLDOWN_SECONDS = 30
 DRAFT_COOLDOWN_SECONDS = 2
-WORKERS = 4
-RAW_DIR = "raw"
-DRAFTS_DIR = "drafts"
 WORKERS = 4
 RAW_DIR = "raw"
 DRAFTS_DIR = "drafts"
@@ -108,21 +106,27 @@ class Orchestrator:
 def main():
     os.makedirs(RAW_DIR, exist_ok=True)
     os.makedirs(DRAFTS_DIR, exist_ok=True)
+    os.makedirs(PULLED_PDFS_DIR, exist_ok=True)
     
     orchestrator = Orchestrator()
     observer = Observer()
     
-    # Schedule PDF watcher
+    # Schedule PDF watcher (raw/ — for automated pipeline)
     pdf_handler = PDFHandler(orchestrator)
     observer.schedule(pdf_handler, path=RAW_DIR, recursive=False)
     
     # Schedule Draft watcher
     draft_handler = DraftHandler(orchestrator)
     observer.schedule(draft_handler, path=DRAFTS_DIR, recursive=False)
+
+    # Schedule Manual PDF watcher (pulled_pdfs/ — for user-placed PDFs)
+    manual_handler = ManualPDFHandler()
+    observer.schedule(manual_handler, path=PULLED_PDFS_DIR, recursive=False)
     
-    print(f"Starting Master Orchestrator (Dual Mode)...")
-    print(f" - Monitoring '{RAW_DIR}/' for new PDFs (Cooldown: {COOLDOWN_SECONDS}s, Workers: {WORKERS})")
+    print(f"Starting Master Orchestrator (Tri-Mode)...")
+    print(f" - Monitoring '{RAW_DIR}/' for new source PDFs (Cooldown: {COOLDOWN_SECONDS}s, Workers: {WORKERS})")
     print(f" - Monitoring '{DRAFTS_DIR}/' for text drafts (Cooldown: {DRAFT_COOLDOWN_SECONDS}s)")
+    print(f" - Monitoring '{PULLED_PDFS_DIR}/' for manually placed PDFs (Agent 6)")
     print("Press Ctrl+C to stop.\n")
     
     observer.start()

@@ -15,6 +15,7 @@ from agent1_extractor import run_extractor
 from agent2_fetcher import fetch_papers
 from agent3_ingestor import run_ingestor
 from agent5_batch_citer import run_batch_citer
+from agent6_manual_ingestor import ingest_manual_pdf
 
 @tool
 def extract_citations_tool():
@@ -45,7 +46,16 @@ def batch_cite_tool(file_path: str):
     run_batch_citer(file_path, out_path)
     return f"Draft cited successfully. Output saved to {out_path}."
 
-tools = [extract_citations_tool, fetch_papers_tool, ingest_papers_tool, batch_cite_tool]
+@tool
+def manual_ingest_tool(pdf_path: str, citation_string: str = ""):
+    """Ingests a single manually placed PDF from the pulled_pdfs/ directory into
+    the ChromaDB vector database and rebuilds the BM25 index.
+    Use this when a user manually drops a PDF into the pulled_pdfs/ directory.
+    Optionally accepts a citation_string label; defaults to the PDF filename."""
+    ingest_manual_pdf(pdf_path, citation_string=citation_string or None)
+    return f"Manual PDF '{pdf_path}' ingested successfully."
+
+tools = [extract_citations_tool, fetch_papers_tool, ingest_papers_tool, batch_cite_tool, manual_ingest_tool]
 
 # Initialize LLM
 llm = ChatOllama(model="gemma4:latest", temperature=0)

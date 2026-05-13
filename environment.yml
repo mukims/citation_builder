@@ -1,0 +1,29 @@
+name: rag_prod
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - pip
+  - pip:
+      - watchdog
+      - requests
+      - chromadb
+      - rank-bm25
+      - pymupdf
+      - opencv-python
+      - numpy
+      - tqdm
+      - layoutparser
+      - langchain-ollama
+      - langchain-experimental
+      - ollama
+      - langgraph
+      - langgraph-prebuilt
+      - langchain-core
+      - ragas
+      - datasets
+      # Note: detectron2 is heavily dependent on your specific PyTorch and CUDA version.
+      # You may need to install it manually following the official guide:
+      # https://detectron2.readthedocs.io/en/latest/tutorials/install.html
+      # Example: python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'

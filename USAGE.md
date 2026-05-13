@@ -106,7 +106,7 @@ ollama list
 Agent 3 uses a pre-trained layout detection model. The weight file must exist at:
 
 ```
-../model_final.pth          # one level above the citation_agent/ directory
+../model_final.pth          # one level above the citation_builder/ directory
 ```
 
 This is the `PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x` checkpoint. It is downloaded automatically by `layoutparser` on first use, or you can pre-place it manually.
@@ -116,7 +116,7 @@ This is the `PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x` checkpoint. It is downloade
 ## 3. Directory Structure
 
 ```
-citation_agent/
+citation_builder/
 ├── raw/                        # ← DROP your source PDFs here (Agent 1 reads from here)
 ├── pulled_pdfs/                # Auto-created by Agent 2 — downloaded reference PDFs
 ├── drafts/                     # ← DROP your .txt draft files here (Orchestrator watches this)
@@ -184,7 +184,7 @@ The `master_orchestrator.py` script runs as a persistent background daemon that 
 ### Start the Orchestrator
 
 ```bash
-cd /path/to/citation_agent
+cd /path/to/citation_builder
 conda activate rag_prod
 python master_orchestrator.py
 ```
@@ -222,10 +222,10 @@ Press `Ctrl+C`. All pending timers are cancelled cleanly before exit.
 
 ## 6. Running Agents Manually (Step-by-Step)
 
-All commands below must be run from inside the `citation_agent/` directory with `rag_prod` active.
+All commands below must be run from inside the `citation_builder/` directory with `rag_prod` active.
 
 ```bash
-cd /path/to/citation_agent
+cd /path/to/citation_builder
 conda activate rag_prod
 ```
 
@@ -337,7 +337,7 @@ python agent3_ingestor.py --workers 4
 - `../extracted_data/images/` — cropped figure/table PNG images
 
 **Important notes:**
-- Detectron2 weights are loaded at `../model_final.pth` (relative to `citation_agent/`).
+- Detectron2 weights are loaded at `../model_final.pth` (relative to `citation_builder/`).
 - Each worker initialises its own Detectron2 model instance; use `--workers 1` if you run into GPU OOM errors.
 - The ingestor **appends** to an existing ChromaDB collection — it does not wipe and recreate it. Running it multiple times on new PDFs is safe and incremental.
 - Chunk IDs are sequentially numbered (`chunk_0`, `chunk_1`, …) and the ingestor reads the current max index before adding new chunks.
@@ -396,7 +396,7 @@ The Planck 2018 results provide precise cosmological parameters including the da
 - Agent 4 is **read-only** — it never modifies the database.
 - The `hybrid_search` function defined in this file is also imported by Agent 5 and `evaluate_rag.py`.
 - The hybrid search retrieves `max(15, top_k * 3)` candidates from each retrieval method before fusing, so increasing `--top_k` also broadens the initial candidate pool.
-- The agent must be run from the `citation_agent/` directory so it can locate `./physics_vectordb` and `./bm25_index.pkl`.
+- The agent must be run from the `citation_builder/` directory so it can locate `./physics_vectordb` and `./bm25_index.pkl`.
 
 ---
 
