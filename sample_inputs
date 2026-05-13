@@ -1,0 +1,14 @@
+Condensed matter physics is a fertile ground for developing inverse problems, but unfortunately, it has been overlooked over development of forward techniques. Deriving a mathematical description of the N-particle system from the observed scattering data is not an easy task, especially if the interactions are unknown. Recent
+experimental advancements have benefited from characterisation techniques like Scanning Tunnelling Microscopy (STM) or Atomic force Microscopy (AFM).
+
+
+
+
+
+
+The expansion of computational power and characterisation techniques over the past few decades is unquestionably one of the key reasons for the unprecedented level of accuracy in material development
+
+
+
+
+The inversion methodology can be written in terms of various degrees of freedom. A multi-terminal approach is not only viable for the experimental set-ups but also allows to interrogate the system in various ways.
