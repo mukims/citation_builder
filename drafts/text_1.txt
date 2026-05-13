@@ -1,0 +1,30 @@
+Fortunately, there are alternatives for our current technology can overcome its
+limitations. The awareness of the looming limits has sparked a global initiative
+to create alternate device technologies. There are indeed concrete solutions and
+paths of scientific innovation to have more efficient and less-energy consuming
+nanodevices. Conventional semiconductor devices use exclusively the charge of
+electrons to generate, transmit and process information. The electron is a funda-
+mental particle that plays a crucial role in many physical phenomena, including
+electricity and magnetism. In the field of spintronics, researchers strive to ex-
+ploit the spin of electrons in order to develop new technologies and devices. For
+example, by controlling the spin of electrons, it may be possible to create more
+energy-efficient transistors, memory devices, and sensors. The field of spin-
+tronics also holds promise for applications in quantum computing, where the spin
+of an electron can be used to represent a quantum bit, or qubit. In addition
+to the spin, the electron has other properties that have been used in various tech-
+nological applications, such as the spin-orbit interaction which causes electrons
+to change their spin states and that can be exploited for use in data stor-
+age and logic operations as well as other applications such as quantum
+computing.
+The discovery of graphene and other atomically-thin two dimensional mate-
+rials opens the path to effectively control and tune the required properties
+for disruptive technologies. Two dimensional materials such as graphene and
+transition metal dichalcogenides (Transition Metal Dichalcogenide (TMDC)s) 
+feature another way to control the so-called valley degree of freedom electrons dis-
+play due to the crystal structure of the material. The valleys are characterized by
+different electron spin and angular momentum states, and can be used to encode
+and manipulate quantum information. The valley degree of freedom can
+also be used to create new types of electronic and optoelectronic devices, such
+as valley transistors and valley-based sensors. To exploit these exotic flavours
+of spin and valley in devices, it is necessary to actively control their electronic
+and magnetic properties at the nanoscale.
