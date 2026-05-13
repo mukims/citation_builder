@@ -8,12 +8,11 @@ This system extracts reference strings from a base PDF, automatically downloads 
 
 ## System Architecture
 
-The pipeline consists of five sequential agents, managed by an intelligent background orchestrator.
+The pipeline consists of five sequential agents, managed by an intelligent background orchestrator and a LangGraph-based supervisor agent.
 
-### The Master Orchestrator (`master_orchestrator.py`)
-- Continuously monitors the `raw/` directory for new PDFs and the `drafts/` directory for text drafts.
-- Automatically handles batching and cooldowns to prevent GPU memory crashes.
-- Drives the entire pipeline (Agents 1-3, and Agent 5) completely hands-off.
+### Orchestration & Control Flow
+- **Master Orchestrator (`master_orchestrator.py`)**: Continuously monitors the `raw/` directory for new PDFs and the `drafts/` directory for text drafts. Automatically handles batching and cooldowns to prevent GPU memory crashes.
+- **LangGraph Supervisor (`agent_graph.py`)**: An LLM-driven tool-calling agent (using `gemma4:latest`) that autonomously decides which tools (agents) to invoke based on events triggered by the orchestrator.
 
 ### Data Ingestion (Agents 1-3)
 1. **Agent 1: Extractor (`agent1_extractor.py`)**: Parses a base PDF to extract the Reference section.
@@ -23,6 +22,9 @@ The pipeline consists of five sequential agents, managed by an intelligent backg
 ### Inference & Writing (Agents 4-5)
 4. **Agent 4: Assistant (`agent4_assistant.py`)**: Interactive CLI assistant. Performs hybrid search to provide a citation suggestion based on a drafted sentence.
 5. **Agent 5: Batch Citer (`agent5_batch_citer.py`)**: Automated draft processor. Semantically processes sentences in a `.txt` draft, querying `gemma4` to decide if factual claims require citations, and automatically appending LaTeX `\cite{cite_key}` tags.
+
+### Evaluation
+- **RAG Evaluation (`evaluate_rag.py`)**: Programmatic evaluation of the pipeline's generation capabilities (measuring faithfulness and answer relevancy) using the **Ragas** framework and `deepseek-r1:14b` as the evaluator.
 
 ## 🚀 Usage
 
