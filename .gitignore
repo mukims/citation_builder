@@ -1,0 +1,59 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.env
+.venv
+env/
+venv/
+
+# ── Jupyter ────────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Local data — large / generated files not to be tracked ────────────────────
+# ChromaDB vector database (rebuilt locally by Agent 3)
+physics_vectordb/
+
+# BM25 index (rebuilt locally by Agent 3)
+bm25_index.pkl
+
+# Downloaded PDFs (sourced automatically or placed manually)
+pulled_pdfs/*.pdf
+
+# Raw source PDFs (user-provided)
+raw/*.pdf
+
+# Extracted figure images
+../extracted_data/
+
+# Detectron2 weights
+../model_final.pth
+
+# ── Keep directory structure in git ───────────────────────────────────────────
+!pulled_pdfs/.gitkeep
+!raw/.gitkeep
+!drafts/.gitkeep
+
+# ── JSON data files (large / machine-generated) ───────────────────────────────
+# Uncomment below if you do NOT want to track these in git:
+# downloaded.json
+# failed_downloads.json
+# extracted_citations.json
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
