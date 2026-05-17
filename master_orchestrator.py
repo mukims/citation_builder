@@ -9,14 +9,20 @@ except ImportError:
     print("Error: 'watchdog' package is not installed. Please run: pip install watchdog")
     sys.exit(1)
 
+from config import (
+    RAW_DIR,
+    DRAFTS_DIR,
+    PULLED_PDFS_DIR,
+    PDF_COOLDOWN_SECONDS,
+    DRAFT_COOLDOWN_SECONDS,
+    DEFAULT_WORKERS,
+)
 from agent_graph import process_event
-from agent6_manual_ingestor import ManualPDFHandler, PULLED_PDFS_DIR
+from agent6_manual_ingestor import ManualPDFHandler
+from shared.log import get_logger
 
-COOLDOWN_SECONDS = 30
-DRAFT_COOLDOWN_SECONDS = 2
-WORKERS = 4
-RAW_DIR = "raw"
-DRAFTS_DIR = "drafts"
+logger = get_logger("orchestrator")
+
 
 class PDFHandler(FileSystemEventHandler):
     def __init__(self, orchestrator):
@@ -24,7 +30,7 @@ class PDFHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.lower().endswith(".pdf"):
-            print(f"[Watcher] Detected new PDF: {event.src_path}")
+            logger.info("[Watcher] Detected new PDF: %s", event.src_path)
             self.orchestrator.trigger_pdf_cooldown()
 
 class DraftHandler(FileSystemEventHandler):
@@ -40,7 +46,7 @@ class DraftHandler(FileSystemEventHandler):
     def handle_event(self, event):
         if not event.is_directory and event.src_path.lower().endswith(".txt"):
             if not event.src_path.lower().endswith("_cited.txt"):
-                print(f"[Watcher] Detected draft update: {event.src_path}")
+                logger.info("[Watcher] Detected draft update: %s", event.src_path)
                 self.orchestrator.trigger_draft_run(event.src_path)
 
 class Orchestrator:
@@ -56,7 +62,7 @@ class Orchestrator:
     def trigger_pdf_cooldown(self):
         with self.pdf_lock:
             if self.is_processing_pdf:
-                print("[Watcher] Pipeline currently running. File queued for NEXT run.")
+                logger.info("[Watcher] Pipeline currently running. File queued for NEXT run.")
                 self.pdf_run_pending = True
             else:
                 self.schedule_pdf_run()
@@ -64,8 +70,11 @@ class Orchestrator:
     def schedule_pdf_run(self):
         if self.pdf_timer:
             self.pdf_timer.cancel()
-        print(f"[Watcher] Pipeline scheduled to run in {COOLDOWN_SECONDS} seconds... (Drop more files to reset timer)")
-        self.pdf_timer = threading.Timer(COOLDOWN_SECONDS, self.run_pipeline)
+        logger.info(
+            "[Watcher] Pipeline scheduled to run in %ds… (Drop more files to reset timer)",
+            PDF_COOLDOWN_SECONDS,
+        )
+        self.pdf_timer = threading.Timer(PDF_COOLDOWN_SECONDS, self.run_pipeline)
         self.pdf_timer.start()
 
     def run_pipeline(self):
@@ -74,15 +83,15 @@ class Orchestrator:
             self.pdf_run_pending = False
 
         try:
-            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Notifying Supervisor Agent of new PDFs...")
+            logger.info("Notifying Supervisor Agent of new PDFs…")
             process_event("New PDFs have been added to the raw/ directory. Please extract citations from them, fetch the papers, and ingest them.")
         except Exception as e:
-            print(f"\n[Orchestrator] UNEXPECTED ERROR: {e}")
+            logger.error("UNEXPECTED ERROR: %s", e)
         finally:
             with self.pdf_lock:
                 self.is_processing_pdf = False
                 if self.pdf_run_pending:
-                    print("[Watcher] Resolving pending queued PDFs...")
+                    logger.info("[Watcher] Resolving pending queued PDFs…")
                     self.schedule_pdf_run()
 
     def trigger_draft_run(self, filepath):
@@ -90,17 +99,17 @@ class Orchestrator:
             if filepath in self.draft_timers:
                 self.draft_timers[filepath].cancel()
             
-            # Start a short 2-second debounce timer
+            # Start a short debounce timer
             timer = threading.Timer(DRAFT_COOLDOWN_SECONDS, self.run_agent5, args=[filepath])
             self.draft_timers[filepath] = timer
             timer.start()
 
     def run_agent5(self, filepath):
         try:
-            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Notifying Supervisor Agent of new draft: {filepath}...")
+            logger.info("Notifying Supervisor Agent of new draft: %s…", filepath)
             process_event(f"A new draft text file needs citation processing. The file is located at: {filepath}. Please use the batch cite tool.")
         except Exception as e:
-            print(f"\n[Orchestrator] UNEXPECTED ERROR during draft citing: {e}")
+            logger.error("UNEXPECTED ERROR during draft citing: %s", e)
 
 
 def main():
@@ -123,18 +132,18 @@ def main():
     manual_handler = ManualPDFHandler()
     observer.schedule(manual_handler, path=PULLED_PDFS_DIR, recursive=False)
     
-    print(f"Starting Master Orchestrator (Tri-Mode)...")
-    print(f" - Monitoring '{RAW_DIR}/' for new source PDFs (Cooldown: {COOLDOWN_SECONDS}s, Workers: {WORKERS})")
-    print(f" - Monitoring '{DRAFTS_DIR}/' for text drafts (Cooldown: {DRAFT_COOLDOWN_SECONDS}s)")
-    print(f" - Monitoring '{PULLED_PDFS_DIR}/' for manually placed PDFs (Agent 6)")
-    print("Press Ctrl+C to stop.\n")
+    logger.info("Starting Master Orchestrator (Tri-Mode)…")
+    logger.info(" - Monitoring '%s/' for new source PDFs (Cooldown: %ds, Workers: %d)", RAW_DIR, PDF_COOLDOWN_SECONDS, DEFAULT_WORKERS)
+    logger.info(" - Monitoring '%s/' for text drafts (Cooldown: %ds)", DRAFTS_DIR, DRAFT_COOLDOWN_SECONDS)
+    logger.info(" - Monitoring '%s/' for manually placed PDFs (Agent 6)", PULLED_PDFS_DIR)
+    logger.info("Press Ctrl+C to stop.")
     
     observer.start()
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStopping Orchestrator...")
+        logger.info("Stopping Orchestrator…")
         if orchestrator.pdf_timer:
             orchestrator.pdf_timer.cancel()
         for timer in orchestrator.draft_timers.values():

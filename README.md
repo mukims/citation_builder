@@ -6,16 +6,26 @@ This system extracts reference strings from a base PDF, automatically downloads 
 
 ## System Architecture
 
-The pipeline consists of five sequential agents, managed by an intelligent background orchestrator and a LangGraph-based supervisor agent.
+The pipeline consists six agents, a shared utility layer, and an intelligent orchestrator backed by a LangGraph supervisor.
+
+### Core Infrastructure
+
+- **Central Configuration (`config.py`)**: A single source of truth for all model names, file paths, directory locations, and tunable constants. Changing a model or threshold only requires editing one file.
+- **Shared Utilities (`shared/`)**: A reusable library of modules shared across all agents:
+  - `shared/ingestion.py` — PDF processing (Detectron2 layout + VLM), ChromaDB upsert, BM25 rebuild
+  - `shared/search.py` — Hybrid search (dense + sparse) with Reciprocal Rank Fusion and singleton embeddings
+  - `shared/db.py` — ChromaDB + BM25 loading utilities
+  - `shared/retry.py` — Exponential-backoff retry decorator for Ollama calls
+  - `shared/log.py` — Centralised `logging` configuration (console + rotating file)
 
 ### Orchestration & Control Flow
-- **Master Orchestrator (`master_orchestrator.py`)**: Continuously monitors the `raw/` directory for new PDFs and the `drafts/` directory for text drafts. It implements debouncing and cooldown timers to prevent GPU memory crashes during rapid file drops, and delegates events to the LangGraph supervisor.
+- **Master Orchestrator (`master_orchestrator.py`)**: Continuously monitors the `raw/`, `drafts/`, and `pulled_pdfs/` directories. It implements debouncing and cooldown timers to prevent GPU memory crashes during rapid file drops, and delegates events to the LangGraph supervisor.
 - **LangGraph Supervisor (`agent_graph.py`)**: A ReAct-style agent utilizing LangGraph and `gemma4:latest` with tool-calling capabilities. When an event is triggered by the orchestrator (e.g., "A new PDF was dropped"), this agent autonomously reasons about the state of the pipeline and iteratively calls the necessary underlying agent tools to process the data.
 
 ### Data Ingestion (Agents 1-3)
 1. **Agent 1: Extractor (`agent1_extractor.py`)**: 
    - Scans all PDFs dropped into the `raw/` directory using `pdftotext`.
-   - Uses regex parsing to locate the "References" section and extract individual citation strings (e.g., `[1] Author, Title...`).
+   - Supports multiple reference formats (`[N] Author...` and `N. Author...`) via configurable regex patterns.
    - Deduplicates citations and outputs them to `extracted_citations.json`.
    
 2. **Agent 2: Fetcher (`agent2_fetcher.py`)**: 
@@ -24,28 +34,32 @@ The pipeline consists of five sequential agents, managed by an intelligent backg
    - **Stage 2**: Queries the Unpaywall API to check for an open-access PDF link.
    - **Stage 3**: If Unpaywall fails, falls back to searching the arXiv API by title.
    - Downloads successful matches to `pulled_pdfs/` and maintains state in `downloaded.json` and `failed_downloads.json`.
+   - **Incremental & crash-safe**: Merges with existing state on startup and checkpoints after every paper.
 
 3. **Agent 3: Ingestor (`agent3_ingestor.py`)**: 
    - A multimodal processing engine that reads the downloaded PDFs.
-   - Uses **Detectron2** (`PubLayNet`) to detect document layouts (text blocks, figures, tables).
-   - Crops figures and tables, and passes them to **`gemma4:latest`** (multimodal) to generate rich textual descriptions of the visual data.
-   - Splits text using SemanticChunker, embeds everything using **`nomic-embed-text`**, and upserts it into a **ChromaDB** persistent vector database.
+   - Delegates to `shared/ingestion.py` for layout detection (Detectron2 PubLayNet), VLM figure description (`gemma4:latest`), semantic chunking, and ChromaDB upsert.
    - Automatically rebuilds a sparse **BM25 index** across the entire database for hybrid search.
 
 ### Inference & Writing (Agents 4-5)
 4. **Agent 4: Assistant (`agent4_assistant.py`)**: 
    - An interactive CLI assistant for citing individual sentences.
-   - Performs a **Hybrid Search** (ChromaDB dense vectors + BM25 sparse index), fused via Reciprocal Rank Fusion (RRF) at `k=60`.
-   - Passes the retrieved context and the user's sentence to `gemma4:latest`, which suggests a rewrite with an inline citation and explains its reasoning.
+   - Uses `shared/search.py` for **Hybrid Search** (dense + BM25 sparse, fused via RRF).
+   - LLM calls are wrapped with automatic retry logic.
 
 5. **Agent 5: Batch Citer (`agent5_batch_citer.py`)**: 
-   - An automated draft processor that reads a plain `.txt` draft and splits it into sentences.
-   - Semantically analyzes each sentence with `gemma4:latest` to determine if it contains a factual scientific claim that *requires* a citation.
-   - For sentences needing citations, it performs the Hybrid Search, builds a continuous `cite_key` mapping, and rewrites the sentence to append LaTeX `\cite{cite_key}` tags.
+   - An automated draft processor that reads a plain `.txt` draft.
+   - Uses an improved sentence splitter that handles scientific abbreviations (`et al.`, `Fig.`, `Eq.`).
+   - **Batched citation-need check**: Determines which sentences need citations in a single LLM call instead of one per sentence.
    - Outputs a fully cited `_cited.txt` draft and a `_citations.json` mapping for BibTeX compilation.
 
+### Manual Ingestion
+6. **Agent 6: Manual Ingestor (`agent6_manual_ingestor.py`)**:
+   - Watches `pulled_pdfs/` for manually dropped PDFs and ingests them directly.
+   - Delegates to the same `shared/ingestion.py` pipeline as Agent 3.
+
 ### Evaluation
-- **RAG Evaluation (`evaluate_rag.py`)**: Programmatic evaluation of the pipeline's retrieval and generation capabilities. It uses the **Ragas** framework alongside `deepseek-r1:14b` as a judge LLM to evaluate sample queries on metrics such as *Faithfulness* (is the answer grounded in context?) and *Answer Relevancy* (does it address the prompt?).
+- **RAG Evaluation (`evaluate_rag.py`)**: Programmatic evaluation of the pipeline's retrieval and generation capabilities. Uses the **Ragas** framework alongside `deepseek-r1:14b` as a judge LLM to evaluate sample queries on metrics such as *Faithfulness* and *Answer Relevancy*.
 
 ## 🚀 Usage
 

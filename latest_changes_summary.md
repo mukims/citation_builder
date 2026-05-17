@@ -2,6 +2,43 @@
 
 This document summarizes the recent updates and enhancements made to the `citation_agent` repository.
 
+## 0. Architecture Refactoring & Reliability Improvements (Latest)
+**Date:** May 17, 2026
+**Summary:** Major refactoring to eliminate code duplication, fix critical bugs, and improve reliability across the entire pipeline.
+
+### Bug Fixes (Critical)
+- **Agent 2 `downloaded.json` overwrite bug fixed** — previously, every Agent 2 run would overwrite the file, silently destroying fetch history from prior runs. Now merges with existing state on startup.
+- **Agent 2 crash-safe checkpointing** — `downloaded.json` and `failed_downloads.json` are now written to disk after every single paper, so crashes never lose progress.
+- **Agent 2 skip-already-processed** — citations already in `downloaded.json` or `failed_downloads.json` are skipped on re-runs, making the fetcher fully incremental.
+
+### New: `config.py` — Central Configuration
+- All hardcoded model names (`gemma4:latest`, `nomic-embed-text`, etc.), file paths, directory paths, and tunable constants moved to a single `config.py`.
+- Changing a model or threshold now requires editing one file instead of 5+.
+
+### New: `shared/` Module
+- **`shared/ingestion.py`** — Extracted ~200 lines of duplicated PDF processing (Detectron2 + VLM + ChromaDB + BM25) shared by Agent 3 and Agent 6.
+- **`shared/search.py`** — Hybrid search with a singleton `OllamaEmbeddings` instance. Previously, Agent 5 created a new connection per sentence (~50 connections for a 50-sentence draft).
+- **`shared/db.py`** — ChromaDB + BM25 loading boilerplate extracted from Agents 4, 5, and `evaluate_rag.py`.
+- **`shared/retry.py`** — Exponential-backoff retry decorator wrapping all Ollama calls (3 attempts, 2s/4s/8s backoff).
+- **`shared/log.py`** — Python `logging` module replacing all `print()` calls. Console + rotating log file (`logs/citation_agent.log`, 5 MB, 3 backups).
+
+### Agent Improvements
+- **Agent 1** — Now supports multiple reference formats (`[N] Author...` and `N. Author...`) via configurable regex patterns.
+- **Agent 5** — Improved sentence splitter handles `et al.`, `Fig.`, `Eq.`, `Dr.`, `i.e.` without breaking.
+- **Agent 5** — Batched citation-need check: all sentences checked in a single LLM call instead of one per sentence (cuts LLM round-trips in half).
+- **All agents** — Bare `except:` clauses replaced with specific `except (ValueError, IndexError)`.
+- **All agents** — LLM calls wrapped with retry decorator.
+
+### Code Reduction
+- Agent 3: 315 → 65 lines (delegates to `shared/ingestion.py`)
+- Agent 6: 397 → 150 lines (delegates to `shared/ingestion.py`)
+- Agent 4: 162 → 80 lines (delegates to `shared/search.py` + `shared/db.py`)
+
+### Documentation
+- `README.md`, `USAGE.md`, `FAQ.md` updated to reflect all changes.
+
+---
+
 ## 1. Architectural Refactoring & Agent Graph (Latest)
 **Commit:** `d6e82f1`
 **Date:** May 8, 2026

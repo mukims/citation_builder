@@ -7,8 +7,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_core.tools import tool
 
-import sys
-import os
+from config import LLM_MODEL
 
 # Import agent functions
 from agent1_extractor import run_extractor
@@ -58,7 +57,7 @@ def manual_ingest_tool(pdf_path: str, citation_string: str = ""):
 tools = [extract_citations_tool, fetch_papers_tool, ingest_papers_tool, batch_cite_tool, manual_ingest_tool]
 
 # Initialize LLM
-llm = ChatOllama(model="gemma4:latest", temperature=0)
+llm = ChatOllama(model=LLM_MODEL, temperature=0)
 llm_with_tools = llm.bind_tools(tools)
 
 class AgentState(TypedDict):

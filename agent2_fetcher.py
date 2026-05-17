@@ -6,22 +6,66 @@ import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 
+from config import (
+    EXTRACTED_CITATIONS_PATH,
+    DOWNLOADED_JSON_PATH,
+    FAILED_DOWNLOADS_PATH,
+    PULLED_PDFS_DIR,
+    UNPAYWALL_EMAIL,
+    MAX_CITATION_LEN,
+    ARXIV_RATE_LIMIT,
+    UNPAYWALL_SLEEP,
+)
+from shared.log import get_logger
+
+logger = get_logger("agent2")
+
+
+def _checkpoint(downloaded, failed):
+    """Write state to disk after every paper — crash-safe incremental saves."""
+    with open(DOWNLOADED_JSON_PATH, "w") as f:
+        json.dump(downloaded, f, indent=4)
+    with open(FAILED_DOWNLOADS_PATH, "w") as f:
+        json.dump(failed, f, indent=4)
+
+
 def fetch_papers():
-    with open("extracted_citations.json", "r") as f:
+    with open(EXTRACTED_CITATIONS_PATH, "r") as f:
         citations = json.load(f)
         
-    citations = [c for c in citations if len(c) < 500]
-    print(f"Loaded {len(citations)} valid citations to fetch.")
+    citations = [c for c in citations if len(c) < MAX_CITATION_LEN]
+    logger.info("Loaded %d valid citations to fetch.", len(citations))
     
-    os.makedirs("pulled_pdfs", exist_ok=True)
+    os.makedirs(PULLED_PDFS_DIR, exist_ok=True)
     
-    downloaded = {}
-    failed = []
-    
-    email = "researcher123987@gmail.com"
-    
-    for i, citation in enumerate(citations):
-        print(f"[{i+1}/{len(citations)}] Processing: {citation[:60]}...")
+    # ── FIX #1: Merge with existing state instead of overwriting ──────────
+    if os.path.exists(DOWNLOADED_JSON_PATH):
+        with open(DOWNLOADED_JSON_PATH, "r") as f:
+            downloaded = json.load(f)
+        logger.info("Resuming from existing state: %d papers already downloaded.", len(downloaded))
+    else:
+        downloaded = {}
+
+    if os.path.exists(FAILED_DOWNLOADS_PATH):
+        with open(FAILED_DOWNLOADS_PATH, "r") as f:
+            failed = json.load(f)
+    else:
+        failed = []
+
+    # Skip citations we've already successfully fetched
+    already_fetched = set(downloaded.values())
+    already_failed = {entry["citation"] for entry in failed}
+    remaining = [c for c in citations if c not in already_fetched and c not in already_failed]
+
+    if len(remaining) < len(citations):
+        logger.info(
+            "Skipping %d already-processed citations. %d remaining.",
+            len(citations) - len(remaining),
+            len(remaining),
+        )
+
+    for i, citation in enumerate(remaining):
+        logger.info("[%d/%d] Processing: %s…", i + 1, len(remaining), citation[:60])
         pdf_saved = False
         fail_reason = ""
         
@@ -44,7 +88,7 @@ def fetch_papers():
             if doi:
                 # 2. Query Unpaywall using the DOI
                 unpaywall_url = f"https://api.unpaywall.org/v2/{doi}"
-                u_params = {"email": email}
+                u_params = {"email": UNPAYWALL_EMAIL}
                 u_res = requests.get(unpaywall_url, params=u_params, timeout=10)
                 
                 if u_res.status_code == 200:
@@ -56,12 +100,12 @@ def fetch_papers():
                             pdf_res = requests.get(pdf_url, stream=True, timeout=15)
                             if pdf_res.status_code == 200:
                                 safe_title = re.sub(r'[^a-zA-Z0-9_\-]', '_', title)[:50]
-                                filename = f"pulled_pdfs/{safe_title}_{i}.pdf"
+                                filename = os.path.join(PULLED_PDFS_DIR, f"{safe_title}_{i}.pdf")
                                 with open(filename, "wb") as pdf_file:
                                     for chunk in pdf_res.iter_content(chunk_size=8192):
                                         pdf_file.write(chunk)
                                 downloaded[filename] = citation
-                                print(f" --> SUCCESS! Saved to {filename}")
+                                logger.info(" --> SUCCESS! Saved to %s", filename)
                                 pdf_saved = True
                             else:
                                 fail_reason = f"PDF download link failed (status {pdf_res.status_code})"
@@ -76,7 +120,7 @@ def fetch_papers():
 
             # 4. Fallback to arXiv if Unpaywall failed or NO DOI
             if not pdf_saved:
-                print(f"     -> Unpaywall missed it ({fail_reason}). Trying arXiv fallback...")
+                logger.info("     -> Unpaywall missed it (%s). Trying arXiv fallback…", fail_reason)
                 query = f'ti:"{title}"' if title != "Unknown" else f'all:"{citation}"'
                 safe_query = urllib.parse.quote(query)
                 arxiv_url = f'http://export.arxiv.org/api/query?search_query={safe_query}&max_results=1'
@@ -103,15 +147,15 @@ def fetch_papers():
                             a_res = requests.get(pdf_link, stream=True, timeout=15)
                             if a_res.status_code == 200:
                                 safe_title = re.sub(r'[^a-zA-Z0-9_\-]', '_', title)[:50]
-                                filename = f"pulled_pdfs/{safe_title}_{i}_arxiv.pdf"
+                                filename = os.path.join(PULLED_PDFS_DIR, f"{safe_title}_{i}_arxiv.pdf")
                                 with open(filename, "wb") as pdf_file:
                                     for chunk in a_res.iter_content(chunk_size=8192):
                                         pdf_file.write(chunk)
                                         
                                 downloaded[filename] = citation
-                                print(f" --> SUCCESS via arXiv! Saved to {filename}")
+                                logger.info(" --> SUCCESS via arXiv! Saved to %s", filename)
                                 pdf_saved = True
-                                time.sleep(3) # arXiv rate limits (1 req / 3 sec)
+                                time.sleep(ARXIV_RATE_LIMIT)
                             else:
                                 fail_reason = f"{fail_reason} | arXiv PDF download failed"
                         else:
@@ -126,21 +170,17 @@ def fetch_papers():
 
         except Exception as e:
             failed.append({"citation": citation, "reason": str(e)})
-            print(f" --> ERROR: {e}")
+            logger.error(" --> ERROR: %s", e)
             
-        if pdf_saved:
-            time.sleep(0.5) # Courtesy sleep for unpaywall
-        else:
-            time.sleep(3) # if we fell through to arxiv, ensure we pause
+        # ── FIX #7: Checkpoint after every paper ─────────────────────────
+        _checkpoint(downloaded, failed)
 
-    # Write metadata
-    with open("downloaded.json", "w") as f:
-        json.dump(downloaded, f, indent=4)
-        
-    with open("failed_downloads.json", "w") as f:
-        json.dump(failed, f, indent=4)
-        
-    print(f"\nDone! Downloaded {len(downloaded)}, Failed {len(failed)}")
+        if pdf_saved:
+            time.sleep(UNPAYWALL_SLEEP)
+        else:
+            time.sleep(ARXIV_RATE_LIMIT)
+
+    logger.info("Done! Downloaded %d, Failed %d", len(downloaded), len(failed))
 
 if __name__ == "__main__":
     fetch_papers()

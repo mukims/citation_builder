@@ -1,10 +1,8 @@
 import os
-import pickle
-import chromadb
+import re
 import pandas as pd
 from datasets import Dataset
 import ollama
-import re
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from ragas import evaluate
@@ -14,37 +12,13 @@ from ragas.run_config import RunConfig
 from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper
 
-from agent4_assistant import hybrid_search
+from config import LLM_MODEL, EVAL_MODEL, EMBED_MODEL
+from shared.log import get_logger
+from shared.db import load_search_resources
+from shared.search import hybrid_search
 
-def load_data():
-    print("Connecting to Vector DB and BM25...")
-    db_path = "./physics_vectordb"
-    chroma_client = chromadb.PersistentClient(path=db_path)
-    collection = chroma_client.get_collection(name="physics_papers")
+logger = get_logger("evaluate")
 
-    paired_data = []
-    limit = 1000
-    offset = 0
-    while True:
-        batch = collection.get(include=["documents", "metadatas"], limit=limit, offset=offset)
-        if not batch["ids"]:
-            break
-        for doc, meta, chunk_id in zip(batch["documents"], batch["metadatas"], batch["ids"]):
-            try:
-                idx = int(chunk_id.split("_")[1])
-                paired_data.append((idx, doc, meta))
-            except:
-                pass
-        offset += limit
-
-    paired_data.sort(key=lambda x: x[0])
-    texts = [item[1] for item in paired_data]
-    metadatas = [item[2] for item in paired_data]
-
-    with open("./bm25_index.pkl", "rb") as f:
-        bm25 = pickle.load(f)
-
-    return collection, bm25, texts, metadatas
 
 def get_rag_response(query, collection, bm25, texts, metadatas):
     results = hybrid_search(query, collection, bm25, texts, metadatas, top_k=3)
@@ -78,7 +52,7 @@ def get_rag_response(query, collection, bm25, texts, metadatas):
     ]
 
     response = ollama.chat(
-        model="gemma4:latest",
+        model=LLM_MODEL,
         messages=messages,
         stream=False
     )
@@ -100,12 +74,12 @@ def parse_inputs(filepath):
     return queries
 
 def main():
-    print("Loading RAG pipeline data...")
-    collection, bm25, texts, metadatas = load_data()
+    logger.info("Loading RAG pipeline data…")
+    collection, bm25, texts, metadatas = load_search_resources()
     
-    print("Parsing sample inputs...")
+    logger.info("Parsing sample inputs…")
     queries = parse_inputs("sample_inputs")
-    print(f"Found {len(queries)} queries to evaluate.")
+    logger.info("Found %d queries to evaluate.", len(queries))
     
     data = {
         "user_input": [],
@@ -113,22 +87,22 @@ def main():
         "retrieved_contexts": [],
     }
     
-    print("\n--- Generating Responses ---")
+    logger.info("--- Generating Responses ---")
     for idx, query in enumerate(queries):
-        print(f"\nProcessing query {idx+1}/{len(queries)}...")
+        logger.info("Processing query %d/%d…", idx + 1, len(queries))
         answer, contexts = get_rag_response(query, collection, bm25, texts, metadatas)
         data["user_input"].append(query)
         data["response"].append(answer)
         data["retrieved_contexts"].append(contexts)
-        print(f"Retrieved {len(contexts)} contexts.")
+        logger.info("Retrieved %d contexts.", len(contexts))
         
     dataset = Dataset.from_dict(data)
     
-    print("\n--- Starting Ragas Evaluation ---")
-    print("Initializing evaluator LLM: deepseek-r1:14b")
+    logger.info("--- Starting Ragas Evaluation ---")
+    logger.info("Initializing evaluator LLM: %s", EVAL_MODEL)
     # Wrap with Ragas wrappers
-    evaluator_llm = LangchainLLMWrapper(ChatOllama(model="deepseek-r1:14b", temperature=0.0))
-    evaluator_embeddings = LangchainEmbeddingsWrapper(OllamaEmbeddings(model="nomic-embed-text:latest"))
+    evaluator_llm = LangchainLLMWrapper(ChatOllama(model=EVAL_MODEL, temperature=0.0))
+    evaluator_embeddings = LangchainEmbeddingsWrapper(OllamaEmbeddings(model=EMBED_MODEL))
     
     run_config = RunConfig(timeout=1800, max_retries=5)
     
@@ -140,13 +114,13 @@ def main():
         run_config=run_config
     )
     
-    print("\n--- Evaluation Results ---")
+    logger.info("--- Evaluation Results ---")
     print(results)
     
     # Save results to CSV
     df = results.to_pandas()
     df.to_csv("evaluation_results.csv", index=False)
-    print("Detailed results saved to 'evaluation_results.csv'.")
+    logger.info("Detailed results saved to 'evaluation_results.csv'.")
 
 if __name__ == "__main__":
     main()

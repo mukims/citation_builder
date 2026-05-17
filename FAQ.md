@@ -14,15 +14,17 @@ Researchers, graduate students, and academic writers who want to automate the te
 
 ### Does this require any cloud APIs or paid services?
 
-No. The entire pipeline runs **locally** using [Ollama](https://ollama.com/) for LLM inference and [ChromaDB](https://www.trychroma.com/) for vector storage. The only external network calls are to free, open APIs (Crossref, Unpaywall, arXiv) during the paper-fetching stage.
+No. The entire pipeline runs **locally** using [Ollama](https://ollama.com/) for LLM inference and [ChromaDB](https://www.trychroma.com/) for vector storage. The only external network calls are to free, open APIs (Crossref, Unpaywall, arXiv) during the paper-fetching stage. All model names and paths are centralised in a single `config.py` file.
 
 ### What LLMs does the system use?
 
 | Model | Provider | Purpose |
 |-------|----------|---------|
-| `gemma4:latest` | Ollama | Vision-language figure description (Agent 3), citation judgement (Agent 5), response generation (Agents 4 & 5), and LangGraph supervisor reasoning |
+| `gemma4:latest` | Ollama | Vision-language figure description, citation judgement, response generation, and LangGraph supervisor reasoning |
 | `nomic-embed-text` | Ollama | Dense text embeddings for ChromaDB and hybrid search |
 | `deepseek-r1:14b` | Ollama | Judge LLM used **only** by the Ragas evaluation script |
+
+All model names are configured in `config.py` and can be changed in one place.
 
 ---
 
@@ -60,7 +62,23 @@ Hybrid search combines two retrieval methods and fuses their results:
 1. **Dense retrieval** — ChromaDB similarity search using `nomic-embed-text` embeddings.
 2. **Sparse retrieval** — BM25 keyword matching over the full corpus.
 
-Results from both are merged using **Reciprocal Rank Fusion (RRF)** at `k=60`, which balances precision from dense search with recall from sparse search.
+Results from both are merged using **Reciprocal Rank Fusion (RRF)** at `k=60`, which balances precision from dense search with recall from sparse search. The implementation lives in `shared/search.py` and uses a **singleton embeddings model** — it is created once and reused across all calls, eliminating redundant connections.
+
+### What is the `shared/` module?
+
+The `shared/` directory contains reusable utilities that all agents import:
+
+| Module | Purpose |
+|--------|---------|
+| `shared/ingestion.py` | PDF processing (Detectron2 layout + VLM), ChromaDB upsert, BM25 rebuild |
+| `shared/search.py` | Hybrid search with singleton embeddings and RRF fusion |
+| `shared/db.py` | ChromaDB + BM25 loading (replaces duplicated boilerplate in 3 agents) |
+| `shared/retry.py` | Exponential-backoff retry decorator for Ollama calls |
+| `shared/log.py` | Centralised logging to console + rotating log file |
+
+### What is `config.py`?
+
+A single file containing every model name, file path, directory path, and tunable constant in the pipeline. Instead of editing 5+ files to change a model, you edit one line in `config.py`.
 
 ### Why is Agent 6 separate from Agent 3?
 
@@ -166,6 +184,10 @@ Dark matter accounts for approximately 27% of the total energy density \cite{cit
 
 You can use the JSON mapping to build your BibTeX bibliography.
 
+### Does Agent 5 handle abbreviations like "et al." and "Fig."?
+
+Yes. The sentence splitter uses an improved regex with negative lookbehinds for common scientific abbreviations (`et al.`, `Fig.`, `Eq.`, `Dr.`, `i.e.`, `e.g.`, `Ref.`, etc.), so these no longer cause incorrect sentence breaks.
+
 ### Can I use Agent 4 (interactive mode) instead of Agent 5 (batch mode)?
 
 Yes. Agent 4 is ideal for testing individual sentences or when you want to see the LLM's reasoning:
@@ -232,12 +254,16 @@ Use the Ragas evaluation script (`evaluate_rag.py`) to quantitatively measure fa
 
 ### Can I swap `gemma4` for a different model?
 
-Yes. Change the model name in the relevant scripts:
-- `agent_graph.py` line 61 — supervisor LLM
-- `agent3_ingestor.py` / `agent6_manual_ingestor.py` — VLM for figure description
-- `agent4_assistant.py` / `agent5_batch_citer.py` — generation LLM
+Yes. Change the model name in `config.py`:
 
-Any Ollama-compatible model with tool-calling support can be used for the supervisor. For figure description, a multimodal (vision-language) model is required.
+```python
+# config.py
+LLM_MODEL = "your-model:latest"     # Used by all agents and the supervisor
+EMBED_MODEL = "your-embed-model"    # Used for dense vector search
+EVAL_MODEL = "your-eval-model"      # Used by Ragas evaluation only
+```
+
+All agents import from `config.py`, so this single change propagates everywhere. For the supervisor, the model must support tool-calling. For figure description, a multimodal (vision-language) model is required.
 
 ### How long does the full pipeline take?
 
@@ -330,6 +356,14 @@ The LLM is being conservative. You can:
 - Update to the latest `gemma4` weights: `ollama pull gemma4:latest`
 - Bypass the supervisor entirely and run agents manually (see [Can I run agents individually?](#can-i-run-agents-individually-without-the-orchestrator)).
 
+### Where are the logs?
+
+All agents write to `logs/citation_agent.log` (rotating, 5 MB max, 3 backups). Console output is also logged. Check this file for detailed error traces:
+
+```bash
+tail -f logs/citation_agent.log
+```
+
 ### arXiv rate limiting (HTTP 429)
 
 Agent 2 enforces a 3-second sleep between arXiv requests. If you still hit limits, increase the `time.sleep(3)` values on lines 114 and 134 of `agent2_fetcher.py`.
@@ -352,10 +386,10 @@ Yes, using Agent 6. Drop any PDF directly into `pulled_pdfs/` and it will be ing
 
 ### How do I change the Unpaywall API email?
 
-Edit line 21 of `agent2_fetcher.py`:
+Edit `config.py`:
 
 ```python
-email = "your.email@example.com"
+UNPAYWALL_EMAIL = "your.email@example.com"
 ```
 
 Using your own institutional email may improve rate limits from the Unpaywall API.
@@ -379,8 +413,9 @@ python agent_graph.py
 
 To add a new agent:
 1. Create `agentN_your_agent.py` with a callable entry-point function.
-2. Define a `@tool`-decorated wrapper in `agent_graph.py` and add it to the `tools` list.
-3. The LangGraph supervisor will automatically have access to your new tool.
+2. Import shared utilities as needed (`from shared.search import hybrid_search`, `from config import LLM_MODEL`, etc.).
+3. Define a `@tool`-decorated wrapper in `agent_graph.py` and add it to the `tools` list.
+4. The LangGraph supervisor will automatically have access to your new tool.
 
 ---
 

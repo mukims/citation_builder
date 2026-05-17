@@ -27,7 +27,7 @@ This document is the single authoritative reference for running the multi-agent 
 
 ## 1. System Overview
 
-The pipeline automates the entire lifecycle from raw scientific PDFs → cited LaTeX drafts using a chain of five specialised agents, coordinated by a LangGraph-based supervisor:
+The pipeline automates the entire lifecycle from raw scientific PDFs → cited LaTeX drafts using a chain of six specialised agents and a shared utility layer, coordinated by a LangGraph-based supervisor:
 
 | Agent | Script | Role |
 |-------|--------|------|
@@ -36,13 +36,16 @@ The pipeline automates the entire lifecycle from raw scientific PDFs → cited L
 | 3 | `agent3_ingestor.py` | Multimodal ingestion into ChromaDB + BM25 |
 | 4 | `agent4_assistant.py` | Interactive single-sentence citation helper |
 | 5 | `agent5_batch_citer.py` | Automated full-draft batch citation |
-| — | `agent_graph.py` | **LangGraph supervisor** — LLM-driven tool-calling agent that decides which tools (agents) to invoke |
-| — | `master_orchestrator.py` | Watchdog daemon — monitors directories and delegates events to the LangGraph supervisor |
+| 6 | `agent6_manual_ingestor.py` | Manual PDF ingestion into the database |
+| — | `config.py` | **Central configuration** — all model names, paths, and tunables |
+| — | `shared/` | **Shared utilities** — ingestion, search, DB loading, retry, logging |
+| — | `agent_graph.py` | **LangGraph supervisor** — LLM-driven tool-calling agent |
+| — | `master_orchestrator.py` | Watchdog daemon — monitors directories and delegates events |
 | — | `evaluate_rag.py` | RAG evaluation using the Ragas framework |
 
-**Local models used (via Ollama):**
-- `gemma4:latest` — vision-language model for figure description (Agent 3), citation judgement (Agent 5), response generation (Agents 4 & 5), and supervisor reasoning (Agent Graph).
-- `nomic-embed-text` — text embedding model used for dense vector search (Agents 3, 4, 5).
+**Local models used (via Ollama)** — configured in `config.py`:
+- `gemma4:latest` — vision-language model for figure description, citation judgement, response generation, and supervisor reasoning.
+- `nomic-embed-text` — text embedding model used for dense vector search.
 - `deepseek-r1:14b` — evaluator LLM used by the Ragas evaluation script only.
 
 ---
@@ -117,9 +120,18 @@ This is the `PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x` checkpoint. It is downloade
 
 ```
 citation_builder/
+├── config.py                   # Central configuration (models, paths, tunables)
+├── shared/                     # Shared utility modules
+│   ├── __init__.py
+│   ├── ingestion.py            # PDF processing, ChromaDB upsert, BM25 rebuild
+│   ├── search.py               # Hybrid search (dense + BM25 sparse, RRF fusion)
+│   ├── db.py                   # ChromaDB + BM25 loading utilities
+│   ├── retry.py                # Exponential-backoff retry decorator
+│   └── log.py                  # Centralised logging (console + rotating file)
 ├── raw/                        # ← DROP your source PDFs here (Agent 1 reads from here)
 ├── pulled_pdfs/                # Auto-created by Agent 2 — downloaded reference PDFs
 ├── drafts/                     # ← DROP your .txt draft files here (Orchestrator watches this)
+├── logs/                       # Auto-created — rotating log files
 ├── physics_vectordb/           # ChromaDB persistent vector database (auto-created by Agent 3)
 ├── extracted_citations.json    # Output of Agent 1
 ├── downloaded.json             # Output of Agent 2 — filepath → citation string map
@@ -132,6 +144,7 @@ citation_builder/
 ├── agent3_ingestor.py
 ├── agent4_assistant.py
 ├── agent5_batch_citer.py
+├── agent6_manual_ingestor.py
 ├── agent_graph.py              # LangGraph supervisor agent
 ├── master_orchestrator.py
 └── evaluate_rag.py
@@ -235,7 +248,7 @@ conda activate rag_prod
 
 **What it does:**
 - Scans every `*.pdf` in the `raw/` directory using `pdftotext`.
-- Parses the References section by finding lines matching the pattern `[N] <text>`.
+- Supports **multiple reference formats** via configurable regex patterns: `[N] Author...` and `N. Author...`.
 - Accumulates multi-line citations and deduplicates across all input PDFs.
 - Saves the result to `extracted_citations.json`.
 
@@ -259,7 +272,7 @@ python agent1_extractor.py
 **Notes:**
 - Citations with fewer than 2 characters of page-number-like content are automatically skipped.
 - All PDFs in `raw/` are processed together; duplicates across files are removed.
-- There are no CLI arguments — source directory and output file are hardcoded.
+- Source directory and output file are configured in `config.py` (`RAW_DIR`, `EXTRACTED_CITATIONS_PATH`).
 
 ---
 
@@ -267,12 +280,13 @@ python agent1_extractor.py
 
 **What it does:**
 - Reads `extracted_citations.json` (skips entries > 500 chars, which are usually malformed).
-- For each citation string, runs a **3-stage lookup**:
+- **Merges with existing state** — loads `downloaded.json` on startup and skips already-fetched or already-failed citations.
+- For each remaining citation string, runs a **3-stage lookup**:
   1. **Crossref API** — finds a DOI and paper title via bibliographic search.
   2. **Unpaywall API** — checks if the DOI has an open-access PDF and downloads it.
   3. **arXiv fallback** — if Unpaywall fails, searches arXiv by title and downloads the PDF.
 - Saves downloaded PDFs to `pulled_pdfs/`.
-- Writes `downloaded.json` (filepath → citation mapping) and `failed_downloads.json`.
+- **Checkpoints after every paper** — `downloaded.json` and `failed_downloads.json` are written to disk after each citation, so crashes never lose progress.
 
 **Run:**
 
@@ -294,11 +308,9 @@ python agent2_fetcher.py
 - 3s sleep when falling through to arXiv after a failed Unpaywall lookup.
 
 **Notes:**
-- The Unpaywall API email is hardcoded as `researcher123987@gmail.com`. To use your own email (recommended for higher rate limits), edit line 21 of `agent2_fetcher.py`:
-  ```python
-  email = "your.email@example.com"
-  ```
+- The Unpaywall API email is configured in `config.py` (`UNPAYWALL_EMAIL`). Replace with your own institutional email for higher rate limits.
 - Papers behind a paywall with no arXiv preprint will appear in `failed_downloads.json` with the reason `"Paywalled / Not Open Access"`.
+- Re-running Agent 2 is **safe and incremental** — it will only attempt to fetch citations not already in `downloaded.json` or `failed_downloads.json`.
 
 ---
 
@@ -306,12 +318,8 @@ python agent2_fetcher.py
 
 **What it does:**
 - Reads `downloaded.json` to get the list of PDFs to process.
-- For each PDF, uses **Detectron2** (`PubLayNet` model) to detect layout blocks (text, figures, tables).
-- Extracts raw text blocks via PyMuPDF (`fitz`).
-- For each figure/table detected, crops the image and calls **`gemma4:latest`** (multimodal) to generate a 3–5 sentence description.
-- Applies **SemanticChunker** (LangChain, backed by `nomic-embed-text`) to split text into meaningful chunks.
-- Deduplicates chunks and upserts them into a **ChromaDB** persistent collection (`physics_papers`).
-- Rebuilds the **BM25 sparse index** from all chunks in the database and saves it to `bm25_index.pkl`.
+- Delegates to `shared/ingestion.py` for the full pipeline: Detectron2 layout detection → VLM figure description (`gemma4:latest` with **automatic retry**) → SemanticChunker → ChromaDB upsert.
+- Rebuilds the **BM25 sparse index** from all chunks in the database.
 
 **Run (sequential, default):**
 
@@ -335,14 +343,13 @@ python agent3_ingestor.py --workers 4
 - `physics_vectordb/` — ChromaDB persistent vector database (created/updated)
 - `bm25_index.pkl` — BM25 sparse index rebuilt from the full database
 - `../extracted_data/images/` — cropped figure/table PNG images
+- `logs/citation_agent.log` — rotating log file with detailed processing output
 
 **Important notes:**
-- Detectron2 weights are loaded at `../model_final.pth` (relative to `citation_builder/`).
+- All paths and model names are configured in `config.py` (e.g. `DETECTRON_WEIGHTS`, `EMBED_MODEL`, `EMBED_BATCH_SIZE`).
 - Each worker initialises its own Detectron2 model instance; use `--workers 1` if you run into GPU OOM errors.
 - The ingestor **appends** to an existing ChromaDB collection — it does not wipe and recreate it. Running it multiple times on new PDFs is safe and incremental.
-- Chunk IDs are sequentially numbered (`chunk_0`, `chunk_1`, …) and the ingestor reads the current max index before adding new chunks.
-- Text chunks shorter than 10 characters are silently discarded.
-- Embeddings are batched in groups of 1000, with each document truncated to 4000 characters max.
+- VLM calls (figure/table descriptions) are wrapped with exponential-backoff retry logic (3 attempts) via `shared/retry.py`.
 
 ---
 
@@ -394,9 +401,10 @@ The Planck 2018 results provide precise cosmological parameters including the da
 
 **Notes:**
 - Agent 4 is **read-only** — it never modifies the database.
-- The `hybrid_search` function defined in this file is also imported by Agent 5 and `evaluate_rag.py`.
+- The `hybrid_search` function lives in `shared/search.py` and is shared by Agent 4, Agent 5, and `evaluate_rag.py`.
+- The embeddings model is a module-level singleton — it is created once and reused across all calls.
 - The hybrid search retrieves `max(15, top_k * 3)` candidates from each retrieval method before fusing, so increasing `--top_k` also broadens the initial candidate pool.
-- The agent must be run from the `citation_builder/` directory so it can locate `./physics_vectordb` and `./bm25_index.pkl`.
+- LLM calls are wrapped with automatic retry logic (3 attempts with exponential backoff).
 
 ---
 
@@ -404,14 +412,13 @@ The Planck 2018 results provide precise cosmological parameters including the da
 
 **What it does:**
 - Reads a plain `.txt` draft file.
-- Splits it into individual sentences using a regex splitter (on `.`, `!`, `?`).
-- For each sentence (longer than 3 words), asks **`gemma4:latest`** whether it is a factual scientific claim requiring a citation (`YES`/`NO`).
+- Splits it into individual sentences using an **improved regex splitter** that correctly handles scientific abbreviations (`et al.`, `Fig.`, `Eq.`, `Dr.`, `i.e.`, etc.).
+- **Batched citation-need check**: Sends all eligible sentences (≥4 words) to `gemma4:latest` in a **single LLM call** that returns YES/NO per sentence — replacing the previous one-call-per-sentence approach.
 - For sentences that need citations, runs the same **Hybrid Search** as Agent 4 (`top_k=3`).
 - Builds a running citation key map (`cite_1`, `cite_2`, …) — the same source always gets the same key within a single run.
-- Asks `gemma4:latest` to rewrite the sentence appending `\cite{cite_key}`.
+- Asks `gemma4:latest` to rewrite the sentence appending `\cite{cite_key}` (with retry logic).
 - Joins all sentences back into a cited draft and saves it.
 - Saves a companion `_citations.json` mapping (`cite_key` → full citation string).
-- Prints token stats per sentence.
 
 **Run:**
 
@@ -434,7 +441,8 @@ python agent5_batch_citer.py --file drafts/my_draft.txt --out drafts/my_draft_ci
 **Notes:**
 - Sentences shorter than 4 words are **always skipped** (no citation check performed).
 - If no relevant context is found in the database for a sentence, it is passed through unchanged.
-- Agent 5 imports `hybrid_search` directly from `agent4_assistant.py`, so both scripts must be in the same directory.
+- Agent 5 imports `hybrid_search` from `shared/search.py` (singleton embeddings model — no per-call overhead).
+- All LLM calls are wrapped with exponential-backoff retry logic via `shared/retry.py`.
 - When run via the orchestrator, the output path is automatically set to `<input_path>_cited.txt` and the mapping to `<input_path>_citations.json`.
 
 ---
@@ -541,46 +549,50 @@ python evaluate_rag.py
 
 ## 10. Configuration Reference
 
-Hardcoded constants that can be changed directly in the scripts:
+All tunables are centralised in **`config.py`**. Key settings:
 
-### `master_orchestrator.py`
-
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `COOLDOWN_SECONDS` | `30` | Seconds to wait after the last PDF drop before firing the pipeline |
-| `DRAFT_COOLDOWN_SECONDS` | `2` | Debounce delay before running Agent 5 on a modified draft |
-| `WORKERS` | `4` | Number of parallel workers passed to Agent 3 |
-| `RAW_DIR` | `"raw"` | Directory watched for new source PDFs |
-| `DRAFTS_DIR` | `"drafts"` | Directory watched for new/modified draft `.txt` files |
-
-### `agent_graph.py`
+### Models
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| LLM model | `gemma4:latest` | The model used by the supervisor agent for tool-calling decisions |
-| `temperature` | `0` | Deterministic tool selection |
-| `ingest_papers_tool` workers | `4` | Default worker count when the supervisor calls the ingest tool |
+| `LLM_MODEL` | `gemma4:latest` | Primary LLM for all agents and the supervisor |
+| `EMBED_MODEL` | `nomic-embed-text` | Embedding model for dense vector search |
+| `EVAL_MODEL` | `deepseek-r1:14b` | Judge LLM for Ragas evaluation |
 
-### `agent2_fetcher.py`
+### Orchestrator
 
-| Variable | Line | Description |
-|----------|------|-------------|
-| `email` | 21 | Email for the Unpaywall API — replace with your own |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PDF_COOLDOWN_SECONDS` | `30` | Seconds to wait after last PDF drop before firing pipeline |
+| `DRAFT_COOLDOWN_SECONDS` | `2` | Debounce delay before running Agent 5 on a modified draft |
+| `MANUAL_COOLDOWN_SECONDS` | `5` | Debounce delay for Agent 6 manual PDF ingestion |
+| `DEFAULT_WORKERS` | `4` | Number of parallel workers passed to Agent 3 |
 
-### `agent3_ingestor.py`
+### Ingestion
 
-| Variable | Line | Description |
-|----------|------|-------------|
-| `detectron_weights` | 159 | Path to `model_final.pth` — defaults to `../model_final.pth` |
-| `images_dir` | 160 | Where cropped figures are saved — defaults to `../extracted_data/images` |
-| `breakpoint_threshold_amount` | 189 | SemanticChunker threshold (90th percentile) — lower = more chunks |
-| `batch_size` | 266 | ChromaDB embedding batch size — reduce if hitting memory limits |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DETECTRON_WEIGHTS` | `../model_final.pth` | Path to PubLayNet Detectron2 checkpoint |
+| `DETECTRON_SCORE_THRESH` | `0.5` | Minimum detection confidence score |
+| `SEMANTIC_CHUNKER_AMOUNT` | `90` | SemanticChunker breakpoint percentile — lower = more chunks |
+| `CHUNK_MIN_LENGTH` | `10` | Discard text chunks shorter than this |
+| `EMBED_BATCH_SIZE` | `1000` | ChromaDB embedding batch size |
+| `EMBED_MAX_CHARS` | `4000` | Truncate documents to this length before embedding |
 
-### `agent4_assistant.py`
+### Search
 
-| Variable | Line | Description |
-|----------|------|-------------|
-| `rrf_k` | 14 | RRF fusion constant (default 60) — higher = less rank-bias |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RRF_K` | `60` | RRF fusion constant — higher = less rank bias |
+| `DEFAULT_TOP_K` | `3` | Default number of search results to return |
+
+### Fetcher
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UNPAYWALL_EMAIL` | `researcher123987@gmail.com` | Email for the Unpaywall API — replace with your own |
+| `MAX_CITATION_LEN` | `500` | Skip citations longer than this (likely malformed) |
+| `ARXIV_RATE_LIMIT` | `3` | Seconds between arXiv requests |
 
 ---
 
@@ -621,9 +633,15 @@ ollama serve
 ```
 
 ### Agent 5 — All sentences marked "NO citation needed"
-This typically means `gemma4:latest` is being cautious. You can lower the threshold by modifying the prompt in the `needs_citation()` function (line 16 of `agent5_batch_citer.py`) to be more permissive, or run Agent 4 interactively on specific sentences instead.
+This typically means `gemma4:latest` is being cautious. You can modify the batched citation-need prompt in the `_batch_needs_citation()` function in `agent5_batch_citer.py` to be more permissive, or run Agent 4 interactively on specific sentences instead.
 
 ### LangGraph supervisor loops or picks wrong tools
 The supervisor relies on `gemma4:latest` tool-calling. If it loops or selects incorrect tools, try:
 - Ensuring Ollama is serving the latest `gemma4` weights (`ollama pull gemma4:latest`).
 - Running the agents manually (Section 6) to bypass the supervisor entirely.
+
+### Checking logs for detailed errors
+All agents write to `logs/citation_agent.log` (rotating, 5 MB max, 3 backups). Check this file for detailed error traces:
+```bash
+tail -f logs/citation_agent.log
+```
