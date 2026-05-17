@@ -10,6 +10,7 @@ Provides:
 import os
 import re
 import pickle
+import time
 
 import cv2
 import fitz
@@ -49,6 +50,11 @@ logger = get_logger("ingestion")
 
 # ─── Text helpers ─────────────────────────────────────────────────────────────
 
+# Pre-compiled regex patterns for clean_text (avoid recompilation per call)
+_RE_SPACED_PAIR_BOUNDARY = re.compile(r'\b(\w) (\w) ')
+_RE_SPACED_PAIR_STANDALONE = re.compile(r'(?<!\w)(\w) (\w)(?!\w)')
+_RE_MULTI_SPACE = re.compile(r'\s+')
+
 
 def find_caption(text_blocks, bbox, box_type):
     """Find the nearest caption text below a figure/table bounding box."""
@@ -70,11 +76,19 @@ def find_caption(text_blocks, bbox, box_type):
 
 
 def clean_text(text):
-    """Remove fragmented single-character spacing artifacts from PDF extraction."""
-    text = re.sub(r'\b(\w) (\w) ', r'\1\2', text)
+    """Remove fragmented single-character spacing artifacts from PDF extraction.
+
+    Uses pre-compiled regexes and converges early instead of looping a
+    fixed 20 times.
+    """
+    text = _RE_SPACED_PAIR_BOUNDARY.sub(r'\1\2', text)
+    # Iterate until stable (converges in 2-5 passes for typical PDF artefacts)
     for _ in range(20):
-        text = re.sub(r'(?<!\w)(\w) (\w)(?!\w)', r'\1\2', text)
-    text = re.sub(r'\s+', ' ', text)
+        new_text = _RE_SPACED_PAIR_STANDALONE.sub(r'\1\2', text)
+        if new_text == text:
+            break
+        text = new_text
+    text = _RE_MULTI_SPACE.sub(' ', text)
     return text.strip()
 
 
@@ -99,6 +113,25 @@ def describe_figure(image_path: str, fig_type: str, context: str) -> str:
         return response["message"]["content"]
 
 
+# ─── Detectron2 model cache ──────────────────────────────────────────────────
+# In sequential mode, avoids re-loading the ~400MB model for every PDF.
+
+_detectron_model_cache = {}
+
+
+def _get_detectron_model(weights_path):
+    """Return a cached Detectron2 model (loaded once per unique weights path)."""
+    if weights_path not in _detectron_model_cache:
+        logger.info("Loading Detectron2 model from %s…", weights_path)
+        _detectron_model_cache[weights_path] = lp.Detectron2LayoutModel(
+            config_path=DETECTRON_CONFIG,
+            model_path=weights_path,
+            extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", DETECTRON_SCORE_THRESH],
+            label_map=DETECTRON_LABEL_MAP,
+        )
+    return _detectron_model_cache[weights_path]
+
+
 # ─── Core PDF processing ─────────────────────────────────────────────────────
 
 
@@ -119,25 +152,23 @@ def process_pdf(pdf_path: str, citation_string: str, detectron_weights=None, ima
     images_dir = images_dir or IMAGES_DIR
     os.makedirs(images_dir, exist_ok=True)
 
+    t0 = time.perf_counter()
     logger.info("Processing pages for %s…", pdf_path)
     corpus = []
     dpi = PDF_RENDER_DPI
     zoom = dpi / 72.0
 
-    # Init model inside worker for CUDA compatibility
-    model = lp.Detectron2LayoutModel(
-        config_path=DETECTRON_CONFIG,
-        model_path=detectron_weights,
-        extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", DETECTRON_SCORE_THRESH],
-        label_map=DETECTRON_LABEL_MAP,
-    )
+    # Use cached model in sequential mode; in multiprocessing workers the
+    # cache is per-process so each worker loads once then reuses.
+    model = _get_detectron_model(detectron_weights)
 
     try:
         pdf = fitz.open(pdf_path)
         doc_name = os.path.basename(pdf_path)
         pdf_name = doc_name.strip().replace(" ", "_").lower()
+        num_pages = len(pdf)
 
-        for page_idx in range(len(pdf)):
+        for page_idx in range(num_pages):
             page = pdf[page_idx]
             pix = page.get_pixmap(dpi=dpi)
             img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
@@ -189,6 +220,12 @@ def process_pdf(pdf_path: str, citation_string: str, detectron_weights=None, ima
                     "metadata": {"image_path": out_name, "caption": context},
                 })
 
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "✓ %s: %d pages, %d entries extracted in %.1fs (%.2fs/page)",
+            pdf_name, num_pages, len(corpus), elapsed, elapsed / max(num_pages, 1),
+        )
+
     except Exception as e:
         logger.error("Failed to process %s: %s", pdf_path, e)
 
@@ -202,8 +239,17 @@ def upsert_corpus(corpus: list[dict]):
     """
     Semantic-chunk the corpus and upsert into ChromaDB.
 
+    Batches text blocks together before chunking to reduce the number of
+    embedding calls made by SemanticChunker (one call per batch instead of
+    one per text block).
+
     Returns the number of new chunks inserted.
     """
+    if not corpus:
+        logger.info("Empty corpus — nothing to ingest.")
+        return 0
+
+    t0 = time.perf_counter()
     logger.info("Initializing chunker and embedding model…")
     embeddings = OllamaEmbeddings(model=EMBED_MODEL)
     chunker = SemanticChunker(
@@ -217,8 +263,13 @@ def upsert_corpus(corpus: list[dict]):
         metadata={"hnsw:space": "cosine"},
     )
 
-    # Chunk text entries, pass figures/tables through directly
+    # ── Group text entries by (document, page) and batch-chunk ────────────
+    # Instead of calling chunker.create_documents() once per text block
+    # (which triggers an embedding call each time), we concatenate all text
+    # on the same page and chunk once.  Figures/tables pass through directly.
     total_corpus = []
+    page_text_groups = {}  # key: (document, citation, page) → list[str]
+
     for entry in corpus:
         if entry["type"] in ["figure", "table"]:
             total_corpus.append(entry)
@@ -226,26 +277,46 @@ def upsert_corpus(corpus: list[dict]):
             content = clean_text(entry["content"])
             if len(content) < CHUNK_MIN_LENGTH:
                 continue
-            try:
-                for j, doc in enumerate(chunker.create_documents([content])):
-                    total_corpus.append({
-                        "document": entry["document"],
-                        "citation": entry["citation"],
-                        "page": entry["page"],
-                        "type": "text_chunk",
-                        "content": doc.page_content,
-                        "metadata": {"original_text": content, "chunk_index": j},
-                    })
-            except Exception as e:
-                logger.error("Chunker failed: %s", e)
+            key = (entry["document"], entry["citation"], entry["page"])
+            page_text_groups.setdefault(key, []).append(content)
 
-    # Deduplicate and prepare for insertion
+    # Chunk each page's concatenated text in one call
+    for (doc, cit, page), texts in page_text_groups.items():
+        merged = "\n\n".join(texts)
+        try:
+            docs = chunker.create_documents([merged])
+            for j, doc_chunk in enumerate(docs):
+                total_corpus.append({
+                    "document": doc,
+                    "citation": cit,
+                    "page": page,
+                    "type": "text_chunk",
+                    "content": doc_chunk.page_content,
+                    "metadata": {"chunk_index": j},
+                })
+        except Exception as e:
+            logger.error("Chunker failed on page %d of %s: %s", page, doc, e)
+
+    chunk_time = time.perf_counter() - t0
+    logger.info("Chunking completed in %.1fs (%d entries)", chunk_time, len(total_corpus))
+
+    # ── Deduplicate against existing DB content ──────────────────────────
+    # Fetch existing document texts to skip re-ingesting identical chunks.
+    existing_docs = set()
+    limit, offset = 5000, 0
+    while True:
+        batch = collection.get(include=["documents"], limit=limit, offset=offset)
+        if not batch or not batch["documents"]:
+            break
+        existing_docs.update(batch["documents"])
+        offset += limit
+
     current_index = get_max_chunk_index(collection)
     documents, metadatas, ids, seen = [], [], [], set()
 
     for entry in total_corpus:
         content = entry["content"].strip()
-        if content in seen or len(content) < CHUNK_MIN_LENGTH:
+        if content in seen or content in existing_docs or len(content) < CHUNK_MIN_LENGTH:
             continue
         seen.add(content)
         meta = {
@@ -264,6 +335,7 @@ def upsert_corpus(corpus: list[dict]):
 
     if documents:
         logger.info("Embedding and ingesting %d chunks…", len(documents))
+        embed_t0 = time.perf_counter()
         for i in range(0, len(documents), EMBED_BATCH_SIZE):
             b_docs = [d[:EMBED_MAX_CHARS] for d in documents[i : i + EMBED_BATCH_SIZE]]
             collection.add(
@@ -272,11 +344,45 @@ def upsert_corpus(corpus: list[dict]):
                 metadatas=metadatas[i : i + EMBED_BATCH_SIZE],
                 ids=ids[i : i + EMBED_BATCH_SIZE],
             )
-        logger.info("✓ Ingested %d chunks into ChromaDB.", len(documents))
+        elapsed = time.perf_counter() - t0
+        embed_elapsed = time.perf_counter() - embed_t0
+        logger.info(
+            "✓ Ingested %d chunks into ChromaDB in %.1fs (embed: %.1fs, total: %.1fs)",
+            len(documents), elapsed, embed_elapsed, elapsed,
+        )
     else:
-        logger.info("No new chunks to insert.")
+        logger.info("No new chunks to insert (all duplicates or empty).")
 
     return len(documents)
+
+
+# ─── Already-ingested check ──────────────────────────────────────────────────
+
+
+def get_ingested_documents(collection=None) -> set[str]:
+    """Return the set of document filenames already present in ChromaDB.
+
+    Used by Agent 3 to skip PDFs that have already been fully ingested,
+    avoiding redundant Detectron2 + VLM processing.
+    """
+    if collection is None:
+        chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
+        try:
+            collection = chroma_client.get_collection(name=COLLECTION_NAME)
+        except Exception:
+            return set()
+
+    docs = set()
+    limit, offset = 5000, 0
+    while True:
+        batch = collection.get(include=["metadatas"], limit=limit, offset=offset)
+        if not batch or not batch["metadatas"]:
+            break
+        for meta in batch["metadatas"]:
+            if meta and "document" in meta:
+                docs.add(meta["document"])
+        offset += limit
+    return docs
 
 
 # ─── BM25 rebuild ─────────────────────────────────────────────────────────────
@@ -284,11 +390,13 @@ def upsert_corpus(corpus: list[dict]):
 
 def rebuild_bm25():
     """Rebuild the BM25 index from the entire ChromaDB collection."""
+    t0 = time.perf_counter()
     logger.info("Rebuilding BM25 index…")
     chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
     collection = chroma_client.get_collection(name=COLLECTION_NAME)
 
-    paired, limit, offset = [], 1000, 0
+    # Use larger page size to reduce round-trips
+    paired, limit, offset = [], 5000, 0
     while True:
         batch = collection.get(include=["documents"], limit=limit, offset=offset)
         if not batch or not batch["ids"]:
@@ -306,4 +414,5 @@ def rebuild_bm25():
 
     with open(BM25_INDEX_PATH, "wb") as f:
         pickle.dump(bm25, f)
-    logger.info("✓ BM25 index rebuilt (%d documents).", len(texts))
+    elapsed = time.perf_counter() - t0
+    logger.info("✓ BM25 index rebuilt (%d documents) in %.1fs.", len(texts), elapsed)

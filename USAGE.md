@@ -6,6 +6,7 @@ This document is the single authoritative reference for running the multi-agent 
 
 ## Table of Contents
 
+0. [⚡ Quick Start — Follow These Steps In Order](#0--quick-start--follow-these-steps-in-order)
 1. [System Overview](#1-system-overview)
 2. [Prerequisites & Environment Setup](#2-prerequisites--environment-setup)
 3. [Directory Structure](#3-directory-structure)
@@ -22,6 +23,79 @@ This document is the single authoritative reference for running the multi-agent 
 9. [Output Files Reference](#9-output-files-reference)
 10. [Configuration Reference](#10-configuration-reference)
 11. [Troubleshooting](#11-troubleshooting)
+
+---
+
+## 0. ⚡ Quick Start — Follow These Steps In Order
+
+> **Important:** Complete each step before moving to the next. Steps are sequential — each one depends on the output of the previous step.
+
+### Step 1 — Set up the environment
+
+Install system dependencies, create the conda environment, and pull the required Ollama models. Full details in [Section 2](#2-prerequisites--environment-setup).
+
+```bash
+# System deps
+sudo apt-get install poppler-utils libgl1-mesa-glx libglib2.0-0
+
+# Activate env
+conda activate rag_prod
+
+# Pull models
+ollama pull gemma4:latest
+ollama pull nomic-embed-text
+```
+
+### Step 2 — Place your source PDF(s)
+
+Copy the PDF(s) whose reference lists you want to process into the `raw/` directory:
+
+```bash
+cp ~/papers/my_paper.pdf raw/
+```
+
+### Step 3 — Extract citations from the references section
+
+```bash
+python agent1_extractor.py
+```
+→ Produces `extracted_citations.json`
+
+### Step 4 — Fetch the referenced papers
+
+```bash
+python agent2_fetcher.py
+```
+→ Downloads open-access PDFs into `pulled_pdfs/` and writes `downloaded.json`
+
+### Step 5 — Ingest papers into the vector database
+
+```bash
+python agent3_ingestor.py --workers 4
+```
+→ Builds `physics_vectordb/` (ChromaDB) and `bm25_index.pkl` (BM25 index)
+
+### Step 6 — Cite your draft
+
+**Option A — Automated batch mode (recommended):**
+```bash
+python agent5_batch_citer.py --file drafts/my_draft.txt --out drafts/my_draft_cited.txt
+```
+→ Produces `my_draft_cited.txt` with `\cite{key}` tags + `my_draft_citations.json`
+
+**Option B — Interactive single-sentence mode:**
+```bash
+python agent4_assistant.py --text "Your sentence here."
+```
+
+### Alternative: Fully automated pipeline
+
+Instead of Steps 3–6, you can run the orchestrator which watches directories and handles everything automatically:
+
+```bash
+python master_orchestrator.py
+```
+Then simply drop PDFs into `raw/` and drafts into `drafts/` — the LangGraph supervisor will process them end-to-end. See [Section 5](#5-running-the-full-pipeline-automated--recommended) for details.
 
 ---
 

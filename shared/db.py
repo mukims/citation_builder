@@ -33,7 +33,7 @@ def load_search_resources():
 
     # Paginate all chunks from the collection
     paired_data = []
-    limit, offset = 1000, 0
+    limit, offset = 5000, 0
     while True:
         batch = collection.get(
             include=["documents", "metadatas"], limit=limit, offset=offset
@@ -70,7 +70,7 @@ def get_max_chunk_index(collection) -> int:
     Returns the next available index (max + 1), or 0 if the collection is empty.
     """
     max_idx = -1
-    limit, offset = 1000, 0
+    limit, offset = 5000, 0
     while True:
         batch = collection.get(limit=limit, offset=offset)
         if not batch or not batch["ids"]:
