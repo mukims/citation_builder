@@ -9,6 +9,7 @@ Usage:
     collection, bm25, texts, metadatas = load_search_resources()
 """
 
+import os
 import pickle
 
 import chromadb
@@ -29,7 +30,18 @@ def load_search_resources():
     """
     logger.info("Connecting to ChromaDB at %s…", VECTORDB_PATH)
     chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
-    collection = chroma_client.get_collection(name=COLLECTION_NAME)
+
+    try:
+        collection = chroma_client.get_collection(name=COLLECTION_NAME)
+    except Exception:
+        logger.error(
+            "Collection '%s' not found in ChromaDB at '%s'.\n"
+            "  → You need to run Agent 3 (python agent3_ingestor.py) first to\n"
+            "    ingest papers and create the vector database.",
+            COLLECTION_NAME,
+            VECTORDB_PATH,
+        )
+        raise RuntimeError("Database not initialized. Please ingest papers first.")
 
     # Paginate all chunks from the collection
     paired_data = []
@@ -55,6 +67,14 @@ def load_search_resources():
     metadatas = [item[2] for item in paired_data]
 
     logger.info("Loaded %d chunks from ChromaDB.", len(texts))
+
+    if not os.path.exists(BM25_INDEX_PATH):
+        logger.error(
+            "BM25 index not found at '%s'.\n"
+            "  → Run Agent 3 (python agent3_ingestor.py) to build it.",
+            BM25_INDEX_PATH,
+        )
+        raise RuntimeError("BM25 index not found. Please ingest papers first.")
 
     logger.info("Loading BM25 index from %s…", BM25_INDEX_PATH)
     with open(BM25_INDEX_PATH, "rb") as f:

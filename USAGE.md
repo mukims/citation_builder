@@ -28,7 +28,7 @@ This document is the single authoritative reference for running the multi-agent 
 
 ## 0. ⚡ Quick Start — Follow These Steps In Order
 
-> **Important:** Complete each step before moving to the next. Steps are sequential — each one depends on the output of the previous step.
+> **Important:** Complete each step before moving to the next.
 
 ### Step 1 — Set up the environment
 
@@ -46,56 +46,33 @@ ollama pull gemma4:latest
 ollama pull nomic-embed-text
 ```
 
-### Step 2 — Place your source PDF(s)
-
-Copy the PDF(s) whose reference lists you want to process into the `raw/` directory:
-
-```bash
-cp ~/papers/my_paper.pdf raw/
-```
-
-### Step 3 — Extract citations from the references section
-
-```bash
-python agent1_extractor.py
-```
-→ Produces `extracted_citations.json`
-
-### Step 4 — Fetch the referenced papers
-
-```bash
-python agent2_fetcher.py
-```
-→ Downloads open-access PDFs into `pulled_pdfs/` and writes `downloaded.json`
-
-### Step 5 — Ingest papers into the vector database
-
-```bash
-python agent3_ingestor.py --workers 4
-```
-→ Builds `physics_vectordb/` (ChromaDB) and `bm25_index.pkl` (BM25 index)
-
-### Step 6 — Cite your draft
-
-**Option A — Automated batch mode (recommended):**
-```bash
-python agent5_batch_citer.py --file drafts/my_draft.txt --out drafts/my_draft_cited.txt
-```
-→ Produces `my_draft_cited.txt` with `\cite{key}` tags + `my_draft_citations.json`
-
-**Option B — Interactive single-sentence mode:**
-```bash
-python agent4_assistant.py --text "Your sentence here."
-```
-
-### Alternative: Fully automated pipeline
-
-Instead of Steps 3–6, you can run the orchestrator which watches directories and handles everything automatically:
+### Step 2 — Start the orchestrator
 
 ```bash
 python master_orchestrator.py
 ```
-Then simply drop PDFs into `raw/` and drafts into `drafts/` — the LangGraph supervisor will process them end-to-end. See [Section 5](#5-running-the-full-pipeline-automated--recommended) for details.
+
+On startup, the orchestrator **automatically syncs the database** — any PDFs in `pulled_pdfs/` that aren't yet in ChromaDB are ingested before the watchers start. Then it monitors three directories continuously.
+
+Want to also brainstorm with your papers? Add `--chat`:
+```bash
+python master_orchestrator.py --chat
+```
+This opens an interactive research assistant in the foreground while watchers run in the background.
+
+### Step 3 — Drop your files
+
+| What you want | Where to drop | What happens |
+|---|---|---|
+| Process a source PDF's references | `raw/my_paper.pdf` | Extracts citations → fetches papers → ingests them |
+| Manually add a paper to the database | `pulled_pdfs/paper.pdf` | Auto-ingested into ChromaDB + BM25 |
+| Auto-cite a draft | `drafts/my_draft.txt` | Produces `my_draft_cited.txt` + `my_draft_citations.json` + `my_draft_report.md` |
+
+That's it. The orchestrator handles the rest.
+
+### Alternative: Running agents manually
+
+If you prefer step-by-step control, you can run each agent individually. See [Section 6](#6-running-agents-manually-step-by-step) for details.
 
 ---
 
@@ -111,6 +88,7 @@ The pipeline automates the entire lifecycle from raw scientific PDFs → cited L
 | 4 | `agent4_assistant.py` | Interactive single-sentence citation helper |
 | 5 | `agent5_batch_citer.py` | Automated full-draft batch citation |
 | 6 | `agent6_manual_ingestor.py` | Manual PDF ingestion into the database |
+| 7 | `agent7_research_chat.py` | Interactive research brainstorming assistant |
 | — | `config.py` | **Central configuration** — all model names, paths, and tunables |
 | — | `shared/` | **Shared utilities** — ingestion, search, DB loading, retry, logging |
 | — | `agent_graph.py` | **LangGraph supervisor** — LLM-driven tool-calling agent |
@@ -511,6 +489,7 @@ python agent5_batch_citer.py --file drafts/my_draft.txt --out drafts/my_draft_ci
 |------|----------|
 | `drafts/introduction_cited.txt` | Full draft with `\cite{cite_key}` tags inserted inline |
 | `drafts/introduction_citations.json` | `{ "cite_1": "[3] Planck Collaboration ...", "cite_2": "..." }` |
+| `drafts/introduction_report.md` | **Citation reasoning report** — sentence-by-sentence breakdown explaining why each citation was chosen, with source references and a summary table |
 
 **Notes:**
 - Sentences shorter than 4 words are **always skipped** (no citation check performed).
@@ -518,6 +497,59 @@ python agent5_batch_citer.py --file drafts/my_draft.txt --out drafts/my_draft_ci
 - Agent 5 imports `hybrid_search` from `shared/search.py` (singleton embeddings model — no per-call overhead).
 - All LLM calls are wrapped with exponential-backoff retry logic via `shared/retry.py`.
 - When run via the orchestrator, the output path is automatically set to `<input_path>_cited.txt` and the mapping to `<input_path>_citations.json`.
+
+---
+
+### Agent 7 — Research Chat (`agent7_research_chat.py`)
+
+**What it does:**
+- A **multi-turn conversational RAG agent** that lets researchers brainstorm, ask open-ended questions, and explore ideas against the ingested paper database.
+- Unlike Agent 4 (single-shot citation lookup), Agent 7 **maintains conversation history** so you can refine questions, follow up on previous answers, and explore tangential ideas — all grounded in the literature.
+- Each turn performs a fresh hybrid search for context, while conversation history provides continuity between turns.
+- History is automatically trimmed to the last 20 turns to keep token usage manageable.
+
+**Run:**
+
+```bash
+python agent7_research_chat.py
+python agent7_research_chat.py --top_k 7   # retrieve more context per turn
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--top_k` | int | `5` | Number of context chunks to retrieve per question. |
+
+**In-chat commands:**
+
+| Command | Action |
+|---------|--------|
+| `/clear` | Reset conversation history |
+| `/sources` | Show sources used in the last response (citation, document, relevance score) |
+| `/export` | Save the full conversation to `drafts/research_chat_<timestamp>.md` |
+| `/help` | Show available commands |
+| `quit` / `exit` | End the session |
+
+**Example session:**
+
+```
+You: What are the main approaches to measuring dark matter density?
+
+Assistant: Based on the papers in your database, there are three primary approaches...
+  📚 Drawing from: [3] Planck Collaboration..., [7] Rubin et al...
+  (type /sources for full list)
+
+You: How does the CMB approach compare to gravitational lensing?
+
+Assistant: Great follow-up. The CMB-based measurement from Planck...
+
+You: /export
+✓ Conversation exported to drafts/research_chat_20260517_2205.md
+```
+
+**Notes:**
+- Agent 7 is **read-only** — it never modifies the database.
+- Exported conversations are saved as markdown in the `drafts/` directory.
+- The agent is also available as a tool in the LangGraph supervisor (`research_chat_tool`).
 
 ---
 
@@ -617,6 +649,8 @@ python evaluate_rag.py
 | `../extracted_data/images/` | Agent 3 | Cropped figure/table PNG images named `<pdf>_p<page>_f<fig_idx>.png` |
 | `<draft>_cited.txt` | Agent 5 | Draft with `\cite{key}` tags inserted |
 | `<draft>_citations.json` | Agent 5 | Maps `cite_N` keys → full citation strings for use in a BibTeX builder |
+| `<draft>_report.md` | Agent 5 | Markdown report explaining the reasoning behind each citation decision |
+| `research_chat_<ts>.md` | Agent 7 | Exported research chat session (via `/export` command) |
 | `evaluation_results.csv` | `evaluate_rag.py` | Per-query Ragas evaluation scores |
 
 ---

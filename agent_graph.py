@@ -15,6 +15,7 @@ from agent2_fetcher import fetch_papers
 from agent3_ingestor import run_ingestor
 from agent5_batch_citer import run_batch_citer
 from agent6_manual_ingestor import ingest_manual_pdf
+from agent7_research_chat import ResearchChat
 
 @tool
 def extract_citations_tool():
@@ -42,7 +43,10 @@ def batch_cite_tool(file_path: str):
     """Adds citations to a draft text file and saves the result.
     Use this when a new draft text file needs to be cited."""
     out_path = file_path.replace(".txt", "_cited.txt")
-    run_batch_citer(file_path, out_path)
+    try:
+        run_batch_citer(file_path, out_path)
+    except RuntimeError as e:
+        return f"Tool failed: {e} (Have papers been ingested yet?)"
     return f"Draft cited successfully. Output saved to {out_path}."
 
 @tool
@@ -54,7 +58,25 @@ def manual_ingest_tool(pdf_path: str, citation_string: str = ""):
     ingest_manual_pdf(pdf_path, citation_string=citation_string or None)
     return f"Manual PDF '{pdf_path}' ingested successfully."
 
-tools = [extract_citations_tool, fetch_papers_tool, ingest_papers_tool, batch_cite_tool, manual_ingest_tool]
+# Lazy-init singleton so we don't load the DB at import time
+_research_agent = None
+
+@tool
+def research_chat_tool(question: str):
+    """Answers a research question using the ingested paper database.
+    Use this when a user asks a conceptual, exploratory, or brainstorming question
+    about their research area. The tool searches the paper database and returns
+    a grounded answer with source citations."""
+    global _research_agent
+    try:
+        if _research_agent is None:
+            _research_agent = ResearchChat(top_k=5)
+        answer = _research_agent.chat(question)
+        return answer
+    except RuntimeError as e:
+        return f"Tool failed: {e} (Have papers been ingested yet?)"
+
+tools = [extract_citations_tool, fetch_papers_tool, ingest_papers_tool, batch_cite_tool, manual_ingest_tool, research_chat_tool]
 
 # Initialize LLM
 llm = ChatOllama(model=LLM_MODEL, temperature=0)

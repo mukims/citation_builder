@@ -32,7 +32,7 @@ DOWNLOADED_JSON_PATH     = os.path.join(PROJECT_ROOT, "downloaded.json")
 FAILED_DOWNLOADS_PATH    = os.path.join(PROJECT_ROOT, "failed_downloads.json")
 
 # ─── Detectron2 ───────────────────────────────────────────────────────────────
-DETECTRON_WEIGHTS = os.path.abspath(os.path.join(PROJECT_ROOT, "..", "model_final.pth"))
+DETECTRON_WEIGHTS = os.path.join(PROJECT_ROOT, "model_final.pth")
 DETECTRON_CONFIG  = "lp://PubLayNet/mask_rcnn_X_101_32x8d_FPN_3x/config"
 DETECTRON_LABEL_MAP = {0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
 DETECTRON_SCORE_THRESH = 0.5
@@ -52,7 +52,7 @@ DEFAULT_TOP_K    = 3                # Default number of results to return
 PDF_COOLDOWN_SECONDS     = 30
 DRAFT_COOLDOWN_SECONDS   = 2
 MANUAL_COOLDOWN_SECONDS  = 5
-DEFAULT_WORKERS          = 4
+DEFAULT_WORKERS          = 1
 
 # ─── Agent 2 — Fetcher ───────────────────────────────────────────────────────
 UNPAYWALL_EMAIL    = "researcher123987@gmail.com"
@@ -61,4 +61,4 @@ ARXIV_RATE_LIMIT   = 3     # Seconds between arXiv requests
 UNPAYWALL_SLEEP    = 0.5   # Courtesy sleep after Unpaywall downloads
 
 # ─── Rendering / DPI ─────────────────────────────────────────────────────────
-PDF_RENDER_DPI = 200
+PDF_RENDER_DPI = 72

@@ -11,6 +11,10 @@ import os
 import re
 import pickle
 import time
+import warnings
+from tqdm import tqdm
+
+warnings.filterwarnings("ignore", message=".*torch.meshgrid.*")
 
 import cv2
 import fitz
@@ -122,7 +126,7 @@ _detectron_model_cache = {}
 def _get_detectron_model(weights_path):
     """Return a cached Detectron2 model (loaded once per unique weights path)."""
     if weights_path not in _detectron_model_cache:
-        logger.info("Loading Detectron2 model from %s…", weights_path)
+        logger.debug("Loading Detectron2 model from %s…", weights_path)
         _detectron_model_cache[weights_path] = lp.Detectron2LayoutModel(
             config_path=DETECTRON_CONFIG,
             model_path=weights_path,
@@ -168,7 +172,7 @@ def process_pdf(pdf_path: str, citation_string: str, detectron_weights=None, ima
         pdf_name = doc_name.strip().replace(" ", "_").lower()
         num_pages = len(pdf)
 
-        for page_idx in range(num_pages):
+        for page_idx in tqdm(range(num_pages), desc=f"Parsing {doc_name}", leave=False):
             page = pdf[page_idx]
             pix = page.get_pixmap(dpi=dpi)
             img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)

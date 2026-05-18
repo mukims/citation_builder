@@ -29,7 +29,7 @@ bm25_index.pkl
 
 # Downloaded PDFs (sourced automatically or placed manually)
 pulled_pdfs/*.pdf
-
+archive_pulled_pdfs/*.pdf
 # Raw source PDFs (user-provided)
 raw/*.pdf
 

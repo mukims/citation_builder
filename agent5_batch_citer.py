@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+from datetime import datetime
 
 import ollama
 
@@ -69,13 +70,22 @@ def _batch_needs_citation(sentences):
 
 
 @retry(max_retries=3, backoff=2.0)
-def _cite_sentence(sentence, context_str):
-    """Ask the LLM to rewrite a sentence with a LaTeX \\cite{key} tag."""
+def _cite_sentence_with_reasoning(sentence, context_str):
+    """Ask the LLM to rewrite a sentence with \\cite{key} and explain why.
+
+    Returns:
+        tuple: (cited_sentence, reasoning)
+    """
     sys_prompt = (
         "You are an expert writing assistant. Below is a sentence and some retrieved context. "
-        "Your job is to append a LaTeX citation \\cite{key} to the sentence if the context supports it. "
-        "You MUST use the exact 'Cite Key' provided in the context blocks. "
-        "Output ONLY the rewritten sentence, nothing else."
+        "Your job is:\n"
+        "1. Rewrite the sentence by appending a LaTeX citation \\cite{key} if the context supports it. "
+        "You MUST use the exact 'Cite Key' provided in the context blocks.\n"
+        "2. Provide a brief explanation (2-3 sentences) of WHY this citation is appropriate — "
+        "what specific claim in the sentence is supported by the source.\n\n"
+        "Format your response EXACTLY like this:\n"
+        "CITED: <the rewritten sentence with \\cite{key}>\n"
+        "REASON: <2-3 sentence justification>"
     )
     user_prompt = f"Sentence: {sentence}\n\nRetrieved Context:\n{context_str}"
 
@@ -87,16 +97,106 @@ def _cite_sentence(sentence, context_str):
         ],
     )
     try:
-        cited = response.message.content.strip()
+        raw = response.message.content.strip()
     except AttributeError:
-        cited = response["message"]["content"].strip()
+        raw = response["message"]["content"].strip()
 
     prompt_tokens = getattr(response, "prompt_eval_count", "N/A")
     completion_tokens = getattr(response, "eval_count", "N/A")
     logger.info(
         " -> [Token Stats] Submitted: %s | Generated: %s", prompt_tokens, completion_tokens
     )
-    return cited
+
+    # Parse the structured response
+    cited_sentence = sentence  # fallback
+    reasoning = ""
+
+    cited_match = re.search(r'CITED:\s*(.+?)(?:\nREASON:|$)', raw, re.DOTALL)
+    reason_match = re.search(r'REASON:\s*(.+)', raw, re.DOTALL)
+
+    if cited_match:
+        cited_sentence = cited_match.group(1).strip()
+    elif "\\cite" in raw:
+        # If the model didn't follow format but did produce a citation,
+        # use the first line as the sentence
+        cited_sentence = raw.split("\n")[0].strip()
+
+    if reason_match:
+        reasoning = reason_match.group(1).strip()
+    elif not cited_match and len(raw.split("\n")) > 1:
+        # Try to extract reasoning from non-formatted response
+        reasoning = " ".join(raw.split("\n")[1:]).strip()
+
+    return cited_sentence, reasoning
+
+
+def _generate_report(
+    file_path: str,
+    report_path: str,
+    sentences: list[str],
+    cited_sentences: list[str],
+    needs_cite: list[bool],
+    citation_entries: list[dict],
+    citation_mapping: dict,
+):
+    """Generate a markdown report explaining every citation decision."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    basename = os.path.basename(file_path)
+
+    lines = [
+        f"# Citation Report — `{basename}`",
+        f"*Generated on {timestamp}*\n",
+        "---\n",
+        "## Summary\n",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Total sentences | {len(sentences)} |",
+        f"| Cited sentences | {sum(1 for e in citation_entries if e.get('cited'))} |",
+        f"| Skipped (no citation needed) | {sum(1 for n in needs_cite if not n)} |",
+        f"| Unique sources used | {len(citation_mapping)} |",
+        "",
+        "## Citation Key Mapping\n",
+        "| Key | Full Citation |",
+        "|-----|---------------|",
+    ]
+
+    for full_cit, key in sorted(citation_mapping.items(), key=lambda x: x[1]):
+        # Truncate long citations for the table
+        short = full_cit[:100] + ("…" if len(full_cit) > 100 else "")
+        lines.append(f"| `{key}` | {short} |")
+
+    lines.append("")
+    lines.append("---\n")
+    lines.append("## Sentence-by-Sentence Analysis\n")
+
+    for i, entry in enumerate(citation_entries):
+        lines.append(f"### Sentence {i+1}\n")
+
+        if not entry.get("cited"):
+            lines.append(f"> {entry['original']}\n")
+            lines.append(f"**Decision:** No citation needed — {entry.get('skip_reason', 'skipped')}\n")
+        else:
+            lines.append("**Original:**")
+            lines.append(f"> {entry['original']}\n")
+            lines.append("**With citation:**")
+            lines.append(f"> {entry['cited']}\n")
+
+            if entry.get("reasoning"):
+                lines.append("**Reasoning:**")
+                lines.append(f"{entry['reasoning']}\n")
+
+            if entry.get("sources"):
+                lines.append("**Sources used:**")
+                for src in entry["sources"]:
+                    lines.append(f"- `{src['key']}` — {src['citation'][:80]}")
+                lines.append("")
+
+        lines.append("---\n")
+
+    with open(report_path, "w") as f:
+        f.write("\n".join(lines))
+
+    logger.info("Saved citation report to %s", report_path)
 
 
 def run_batch_citer(file_path, out_path="cited_draft.txt"):
@@ -112,8 +212,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
     sentences = split_into_sentences(draft_text)
     logger.info("Split draft into %d sentences.", len(sentences))
 
-    # ── Batch citation-need check (item #14) ─────────────────────────────
-    # Filter out very short sentences first
+    # ── Batch citation-need check ────────────────────────────────────────
     eligible_indices = [i for i, s in enumerate(sentences) if len(s.split()) >= 4]
     eligible_sentences = [sentences[i] for i in eligible_indices]
 
@@ -127,15 +226,19 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
     # ── Process sentences ────────────────────────────────────────────────
     cited_sentences = []
     citation_mapping = {}
+    citation_entries = []  # For the report
     next_cite_idx = 1
 
     for i, sentence in enumerate(sentences):
         logger.info("[%d/%d] %s", i + 1, len(sentences), sentence[:80])
+        entry = {"original": sentence, "cited": False}
 
         if not needs_cite[i]:
             reason = "too short" if len(sentence.split()) < 4 else "no citation needed"
             logger.info(" -> %s, skipping.", reason)
             cited_sentences.append(sentence)
+            entry["skip_reason"] = reason
+            citation_entries.append(entry)
             continue
 
         logger.info(" -> Needs citation. Searching context…")
@@ -144,9 +247,12 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
         if not results:
             logger.info(" -> No context found.")
             cited_sentences.append(sentence)
+            entry["skip_reason"] = "no relevant context found in database"
+            citation_entries.append(entry)
             continue
 
         context_str = ""
+        sources_used = []
         for r in results:
             cit_source = r["metadata"].get("citation_source", "Unknown")
             if cit_source not in citation_mapping:
@@ -155,15 +261,25 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
 
             cite_key = citation_mapping[cit_source]
             context_str += f"--- Context (Cite Key: {cite_key}) ---\n{r['text']}\n\n"
+            sources_used.append({"key": cite_key, "citation": cit_source})
 
         try:
-            cited_sentence = _cite_sentence(sentence, context_str)
+            cited_sentence, reasoning = _cite_sentence_with_reasoning(sentence, context_str)
             logger.info(" -> Cited: %s", cited_sentence[:80])
             cited_sentences.append(cited_sentence)
+
+            entry["cited"] = True
+            entry["cited_text"] = cited_sentence
+            entry["reasoning"] = reasoning
+            entry["sources"] = sources_used
         except Exception as e:
             logger.error(" -> Error during citing: %s", e)
             cited_sentences.append(sentence)
+            entry["skip_reason"] = f"LLM error: {e}"
 
+        citation_entries.append(entry)
+
+    # ── Write outputs ────────────────────────────────────────────────────
     final_draft = " ".join(cited_sentences)
 
     with open(out_path, "w") as f:
@@ -174,6 +290,13 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
     with open(mapping_file, "w") as f:
         json.dump(citation_mapping, f, indent=4)
     logger.info("Saved citation mapping to %s", mapping_file)
+
+    # ── Generate citation reasoning report ───────────────────────────────
+    report_path = out_path.replace(".txt", "_report.md")
+    _generate_report(
+        file_path, report_path, sentences, cited_sentences,
+        needs_cite, citation_entries, citation_mapping,
+    )
 
 
 if __name__ == "__main__":
