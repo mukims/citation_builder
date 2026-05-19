@@ -37,7 +37,7 @@ raw/*.pdf
 ../extracted_data/
 
 # Detectron2 weights
-../model_final.pth
+/model_final.pth
 
 # ── Keep directory structure in git ───────────────────────────────────────────
 !pulled_pdfs/.gitkeep
