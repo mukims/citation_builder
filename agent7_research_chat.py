@@ -123,18 +123,20 @@ class ResearchChat:
     # ── LLM call ─────────────────────────────────────────────────────────
 
     @retry(max_retries=3, backoff=2.0)
-    def _generate(self, messages: list[dict]) -> str:
+    def _generate(self, messages: list[dict], stream: bool = False):
         """Call the LLM with the full message history."""
-        response = ollama.chat(model=LLM_MODEL, messages=messages)
-        try:
-            return response.message.content
-        except AttributeError:
-            return response["message"]["content"]
+        response = ollama.chat(model=LLM_MODEL, messages=messages, stream=stream)
+        if not stream:
+            try:
+                return response.message.content
+            except AttributeError:
+                return response["message"]["content"]
+        return response
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    def chat(self, user_message: str) -> str:
-        """Process one user turn: retrieve context, generate response, update history."""
+    def chat_stream(self, user_message: str):
+        """Process one user turn: retrieve context, stream response, update history."""
         self.turn_count += 1
 
         # Retrieve relevant context from the database
@@ -162,18 +164,23 @@ class ResearchChat:
         messages.extend(self.history)
         messages.append({"role": "user", "content": augmented_msg})
 
-        # Generate response
-        answer = self._generate(messages)
+        # Generate response in streaming mode
+        full_answer = ""
+        for chunk in self._generate(messages, stream=True):
+            try:
+                content = chunk.message.content
+            except AttributeError:
+                content = chunk["message"]["content"]
+            full_answer += content
+            yield content
 
         # Update history (store the clean user message, not the augmented one)
         self.history.append({"role": "user", "content": user_message})
-        self.history.append({"role": "assistant", "content": answer})
+        self.history.append({"role": "assistant", "content": full_answer})
 
-        # Keep history manageable — trim to last 20 turns (40 messages)
-        if len(self.history) > 40:
-            self.history = self.history[-40:]
-
-        return answer
+        # Keep history manageable — trim to last 10 turns to improve latency
+        if len(self.history) > 10:
+            self.history = self.history[-10:]
 
     def clear_history(self):
         """Reset the conversation."""
@@ -259,8 +266,10 @@ def main():
 
         # Normal chat turn
         try:
-            answer = agent.chat(user_input)
-            print(f"\nAssistant: {answer}\n")
+            print("\nAssistant: ", end="", flush=True)
+            for chunk in agent.chat_stream(user_input):
+                print(chunk, end="", flush=True)
+            print("\n")
             if agent.last_sources:
                 cits = {s["citation"][:60] for s in agent.last_sources[:3]}
                 print(f"  📚 Drawing from: {', '.join(cits)}")

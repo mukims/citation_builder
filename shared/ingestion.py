@@ -364,19 +364,26 @@ def upsert_corpus(corpus: list[dict]):
 
 
 def get_ingested_documents(collection=None) -> set[str]:
-    """Return the set of document filenames already present in ChromaDB.
-
-    Used by Agent 3 to skip PDFs that have already been fully ingested,
-    avoiding redundant Detectron2 + VLM processing.
+    """Return the set of document filenames already present or processed.
+    
+    Checks both ChromaDB and a local manifest file to ensure we don't
+    re-process duplicates or empty PDFs over and over.
     """
+    docs = set()
+    manifest_path = os.path.join(VECTORDB_PATH, "ingestion_manifest.txt")
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r") as f:
+            for line in f:
+                if line.strip():
+                    docs.add(line.strip())
+
     if collection is None:
         chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
         try:
             collection = chroma_client.get_collection(name=COLLECTION_NAME)
         except Exception:
-            return set()
+            return docs
 
-    docs = set()
     limit, offset = 5000, 0
     while True:
         batch = collection.get(include=["metadatas"], limit=limit, offset=offset)
@@ -386,7 +393,15 @@ def get_ingested_documents(collection=None) -> set[str]:
             if meta and "document" in meta:
                 docs.add(meta["document"])
         offset += limit
+        
     return docs
+
+def mark_document_ingested(pdf_name: str):
+    """Mark a document as processed so it's not re-ingested."""
+    os.makedirs(VECTORDB_PATH, exist_ok=True)
+    manifest_path = os.path.join(VECTORDB_PATH, "ingestion_manifest.txt")
+    with open(manifest_path, "a") as f:
+        f.write(pdf_name + "\n")
 
 
 # ─── BM25 rebuild ─────────────────────────────────────────────────────────────

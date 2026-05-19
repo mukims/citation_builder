@@ -45,7 +45,7 @@ from config import (
     COLLECTION_NAME,
 )
 from shared.log import get_logger
-from shared.ingestion import process_pdf, upsert_corpus, rebuild_bm25, get_ingested_documents
+from shared.ingestion import process_pdf, upsert_corpus, rebuild_bm25, get_ingested_documents, mark_document_ingested
 
 logger = get_logger("orchestrator")
 
@@ -115,6 +115,11 @@ def sync_database(workers=1):
     else:
         logger.info("[Sync] No content extracted from new PDFs.")
 
+    # Mark all attempted PDFs as ingested so we don't retry duplicates/failures forever
+    for pdf_path in missing:
+        pdf_name = os.path.basename(pdf_path).strip().replace(" ", "_").lower()
+        mark_document_ingested(pdf_name)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. File Watchers
@@ -164,6 +169,7 @@ class PulledPDFHandler(FileSystemEventHandler):
     def _ingest(self, path):
         with self._lock:
             self._timers.pop(path, None)
+        pdf_name = os.path.basename(path).strip().replace(" ", "_").lower()
         try:
             citation_label = os.path.splitext(os.path.basename(path))[0]
             corpus = process_pdf(path, citation_label)
@@ -173,8 +179,11 @@ class PulledPDFHandler(FileSystemEventHandler):
                 logger.info("[pulled_pdfs/] ✓ Ingested %s (%d chunks).", os.path.basename(path), inserted)
             else:
                 logger.warning("[pulled_pdfs/] No content extracted from %s.", os.path.basename(path))
+            # Always mark as ingested to prevent retry loops on duplicates
+            mark_document_ingested(pdf_name)
         except Exception as e:
             logger.error("[pulled_pdfs/] Failed to ingest %s: %s", path, e)
+            mark_document_ingested(pdf_name)
 
 
 class DraftHandler(FileSystemEventHandler):
@@ -419,8 +428,10 @@ def main():
                     continue
 
                 try:
-                    answer = agent.chat(user_input)
-                    print(f"\nAssistant: {answer}\n")
+                    print("\nAssistant: ", end="", flush=True)
+                    for chunk in agent.chat_stream(user_input):
+                        print(chunk, end="", flush=True)
+                    print("\n")
                     if agent.last_sources:
                         cits = {s["citation"][:60] for s in agent.last_sources[:3]}
                         print(f"  📚 Drawing from: {', '.join(cits)}")
