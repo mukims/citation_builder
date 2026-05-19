@@ -25,10 +25,17 @@ def split_into_sentences(text):
     Split text into sentences, handling common scientific abbreviations
     that contain periods (e.g., "et al.", "Fig.", "Eq.").
     """
-    # Split on sentence-ending punctuation NOT preceded by known abbreviations
-    pattern = rf'(?<!{_ABBREVS})(?<=[.!?])\s+'
-    sentences = re.split(pattern, text.strip())
-    return [s.strip() for s in sentences if s.strip()]
+    _TOKEN = "<PD>"
+    def replace_abbrev_period(match):
+        return match.group(0).replace('.', _TOKEN)
+    
+    # Mask periods in known abbreviations
+    pattern = rf'\b({_ABBREVS})\.'
+    masked_text = re.sub(pattern, replace_abbrev_period, text)
+    
+    # Split on sentence-ending punctuation followed by whitespace
+    sentences = re.split(r'(?<=[.!?])\s+', masked_text.strip())
+    return [s.replace(_TOKEN, '.').strip() for s in sentences if s.strip()]
 
 
 # ─── Batched citation-need check ─────────────────────────────────────────────
