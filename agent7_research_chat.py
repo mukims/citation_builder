@@ -28,7 +28,7 @@ from datetime import datetime
 
 import ollama
 
-from config import LLM_MODEL, DRAFTS_DIR
+from config import CHAT_MODEL, CHAT_OLLAMA_OPTIONS, DRAFTS_DIR
 from shared.log import get_logger
 from shared.db import load_search_resources
 from shared.search import hybrid_search
@@ -125,7 +125,12 @@ class ResearchChat:
     @retry(max_retries=3, backoff=2.0)
     def _generate(self, messages: list[dict], stream: bool = False):
         """Call the LLM with the full message history."""
-        response = ollama.chat(model=LLM_MODEL, messages=messages, stream=stream)
+        response = ollama.chat(
+            model=CHAT_MODEL,
+            messages=messages,
+            stream=stream,
+            options=CHAT_OLLAMA_OPTIONS,
+        )
         if not stream:
             try:
                 return response.message.content

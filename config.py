@@ -12,8 +12,18 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ─── Ollama Models ────────────────────────────────────────────────────────────
 LLM_MODEL       = "gemma4:latest"
+CHAT_MODEL      = "qwen2.5:7b"          # Lighter model for interactive research chat
 EMBED_MODEL     = "nomic-embed-text"
 EVAL_MODEL      = "deepseek-r1:14b"
+
+# ─── Chat Model Runtime Options ──────────────────────────────────────────────
+# Flash Attention + 8-bit quantized KV cache for lower latency on CPU
+CHAT_OLLAMA_OPTIONS = {
+    "num_ctx":    4096,        # Smaller context window = faster inference
+    "num_thread": 16,          # Use most of the available CPU threads
+    "flash_attn": True,        # Enable Flash Attention
+    "kv_cache_type": "q8_0",   # 8-bit quantized KV cache
+}
 
 # ─── Vector Database ──────────────────────────────────────────────────────────
 VECTORDB_PATH    = os.path.join(PROJECT_ROOT, "physics_vectordb")
