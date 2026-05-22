@@ -1,4 +1,4 @@
-# Citation Agent RAG Pipeline
+# Citation Agent Multi-modal RAG Pipeline
 
 A comprehensive, fully automated Retrieval-Augmented Generation (RAG) pipeline designed to automate the extraction, fetching, ingestion, and citation-assistance of scientific literature using local models. 
 
