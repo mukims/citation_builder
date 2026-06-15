@@ -29,9 +29,9 @@ def split_into_sentences(text):
     def replace_abbrev_period(match):
         return match.group(0).replace('.', _TOKEN)
     
-    # Mask periods in known abbreviations
+    # Mask periods in known abbreviations (case-insensitive)
     pattern = rf'\b({_ABBREVS})\.'
-    masked_text = re.sub(pattern, replace_abbrev_period, text)
+    masked_text = re.sub(pattern, replace_abbrev_period, text, flags=re.IGNORECASE)
     
     # Split on sentence-ending punctuation followed by whitespace
     sentences = re.split(r'(?<=[.!?])\s+', masked_text.strip())

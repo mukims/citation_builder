@@ -186,7 +186,46 @@ You can use the JSON mapping to build your BibTeX bibliography.
 
 ### Does Agent 5 handle abbreviations like "et al." and "Fig."?
 
-Yes. The sentence splitter uses an improved regex with negative lookbehinds for common scientific abbreviations (`et al.`, `Fig.`, `Eq.`, `Dr.`, `i.e.`, `e.g.`, `Ref.`, etc.), so these no longer cause incorrect sentence breaks.
+Yes. The sentence splitter uses a case-insensitive period masking and restoration technique for common scientific abbreviations (such as `et al.`, `Fig.`, `Eq.`, `Dr.`, `i.e.`, `e.g.`, `Ref.`, etc.). This avoids incorrect sentence breaks when these abbreviations are used inside sentences.
+
+#### Example Test Cases & Expected Splits
+
+Here is how the sentence splitter parses different inputs (verified by our automated test suite `test_sentence_splitter.py`):
+
+1. **Standard Scientific Abbreviations & Casing:**
+   - **Input:** `"See Fig. 1 for details. This is the next sentence. Also check fig. 2."`
+   - **Expected Splits:**
+     - `"See Fig. 1 for details."`
+     - `"This is the next sentence."`
+     - `"Also check fig. 2."`
+
+2. **Equations and Plurals:**
+   - **Input:** `"Using Eq. 3, we obtain the limit. Compare with eq. 4 and eqs. 5-6."`
+   - **Expected Splits:**
+     - `"Using Eq. 3, we obtain the limit."`
+     - `"Compare with eq. 4 and eqs. 5-6."`
+
+3. **Multi-Period Abbreviations:**
+   - **Input:** `"This is e.g. a classic example. That is i.e. the only explanation."`
+   - **Expected Splits:**
+     - `"This is e.g. a classic example."`
+     - `"That is i.e. the only explanation."`
+
+4. **Academic Titles:**
+   - **Input:** `"Dr. Smith and Prof. Jones analyzed the sample vs. the control group."`
+   - **Expected Splits:**
+     - `"Dr. Smith and Prof. Jones analyzed the sample vs. the control group."`
+
+5. **Nested in Parentheses:**
+   - **Input:** `"We studied the system (e.g. Fig. 1). This is a new sentence."`
+   - **Expected Splits:**
+     - `"We studied the system (e.g. Fig. 1)."`
+     - `"This is a new sentence."`
+
+You can run these test cases locally via the automated test suite:
+```bash
+conda run -n rag_prod python -m unittest test_sentence_splitter.py
+```
 
 ### Can I use Agent 4 (interactive mode) instead of Agent 5 (batch mode)?
 
