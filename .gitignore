@@ -62,6 +62,11 @@ metadata_auth.jsonl
 # Vendored detectron2 checkout — install as a dependency instead of committing
 detectron2/
 
+# ── Evaluation output ─────────────────────────────────────────────────────────
+# Written by evaluate_rag.py. Embeds verbatim draft prose in its user_input
+# column alongside retrieved paper excerpts, so it should not be committed.
+evaluation_results.csv
+
 # ── Logs ──────────────────────────────────────────────────────────────────────
 logs/
 
