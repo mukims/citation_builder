@@ -38,6 +38,26 @@ def split_into_sentences(text):
     return [s.replace(_TOKEN, '.').strip() for s in sentences if s.strip()]
 
 
+# ─── Citation key extraction ─────────────────────────────────────────────────
+
+_CITE_RE = re.compile(r"\\cite\{([^}]*)\}")
+
+
+def _cite_keys(text: str) -> set[str]:
+    """Return the set of citation keys actually present in *text*.
+
+    Handles the multi-key form ``\\cite{a,b}`` as well as ``\\cite{a}``.
+    An empty set means no citation was made, whatever the model replied.
+    """
+    keys = set()
+    for match in _CITE_RE.finditer(text):
+        for key in match.group(1).split(","):
+            key = key.strip()
+            if key:
+                keys.add(key)
+    return keys
+
+
 # ─── Batched citation-need check ─────────────────────────────────────────────
 
 @retry(max_retries=2, backoff=2.0)
@@ -64,16 +84,30 @@ def _batch_needs_citation(sentences):
     except AttributeError:
         answer = response["message"]["content"]
 
-    # Parse the YES/NO list
-    results = []
+    # Parse the YES/NO list.
+    #
+    # Index by the number the model emitted rather than by line position: a
+    # preamble line, a blank line, or a double-spaced list would otherwise
+    # shift every verdict onto the wrong sentence. Padding a short result to
+    # length hides exactly that failure, so a missing verdict raises instead
+    # (the @retry above gives the model two more attempts first).
+    verdicts = {}
     for line in answer.strip().split("\n"):
-        line = line.strip().upper()
-        results.append("YES" in line)
+        match = re.match(r"\s*(\d+)\s*[.)]\s*(YES|NO)\b", line.strip(), re.IGNORECASE)
+        if not match:
+            continue
+        idx = int(match.group(1)) - 1
+        if 0 <= idx < len(sentences):
+            verdicts[idx] = match.group(2).upper() == "YES"
 
-    # Pad or truncate to match input length
-    while len(results) < len(sentences):
-        results.append(False)
-    return results[: len(sentences)]
+    missing = [i + 1 for i in range(len(sentences)) if i not in verdicts]
+    if missing:
+        raise ValueError(
+            f"Citation-need check returned no verdict for sentence(s) {missing} "
+            f"of {len(sentences)}. Raw response:\n{answer.strip()[:500]}"
+        )
+
+    return [verdicts[i] for i in range(len(sentences))]
 
 
 @retry(max_retries=3, backoff=2.0)
@@ -145,10 +179,24 @@ def _generate_report(
     needs_cite: list[bool],
     citation_entries: list[dict],
     citation_mapping: dict,
+    key_registry: dict,
 ):
     """Generate a markdown report explaining every citation decision."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     basename = os.path.basename(file_path)
+
+    # These three are mutually exclusive and cover every sentence, so a reader
+    # can see at a glance how often the pipeline wanted a citation and failed
+    # to produce one — previously indistinguishable from "none needed".
+    n_cited = sum(1 for e in citation_entries if e.get("cited"))
+    n_not_needed = sum(
+        1 for i, e in enumerate(citation_entries)
+        if not e.get("cited") and not needs_cite[i]
+    )
+    n_declined = sum(
+        1 for i, e in enumerate(citation_entries)
+        if not e.get("cited") and needs_cite[i]
+    )
 
     lines = [
         f"# Citation Report — `{basename}`",
@@ -157,10 +205,12 @@ def _generate_report(
         "## Summary\n",
         f"| Metric | Value |",
         f"|--------|-------|",
-        f"| Total sentences | {len(sentences)} |",
-        f"| Cited sentences | {sum(1 for e in citation_entries if e.get('cited'))} |",
-        f"| Skipped (no citation needed) | {sum(1 for n in needs_cite if not n)} |",
-        f"| Unique sources used | {len(citation_mapping)} |",
+        f"| Total sentences | {n_cited + n_not_needed + n_declined} |",
+        f"| Cited | {n_cited} |",
+        f"| No citation needed | {n_not_needed} |",
+        f"| **Needed a citation, none made** | **{n_declined}** |",
+        f"| Unique sources cited | {len(citation_mapping)} |",
+        f"| Sources retrieved but never cited | {len(key_registry) - len(citation_mapping)} |",
         "",
         "## Citation Key Mapping\n",
         "| Key | Full Citation |",
@@ -181,22 +231,45 @@ def _generate_report(
 
         if not entry.get("cited"):
             lines.append(f"> {entry['original']}\n")
-            lines.append(f"**Decision:** No citation needed — {entry.get('skip_reason', 'skipped')}\n")
+            lines.append(f"**Decision:** Not cited — {entry.get('skip_reason', 'skipped')}\n")
+
+            if entry.get("reasoning"):
+                lines.append("**Model's explanation:**")
+                lines.append(f"{entry['reasoning']}\n")
+
+            if entry.get("candidates"):
+                lines.append("**Retrieved but not used:**")
+                for src in entry["candidates"]:
+                    lines.append(f"- `{src['key']}` — {src['citation'][:80]}")
+                lines.append("")
         else:
             lines.append("**Original:**")
             lines.append(f"> {entry['original']}\n")
             lines.append("**With citation:**")
-            lines.append(f"> {entry['cited']}\n")
+            lines.append(f"> {entry['cited_text']}\n")
 
             if entry.get("reasoning"):
                 lines.append("**Reasoning:**")
                 lines.append(f"{entry['reasoning']}\n")
 
+            # Separate what was actually cited from what was merely retrieved —
+            # listing all three candidates as "sources used" overstates the
+            # evidence behind the sentence.
             if entry.get("sources"):
-                lines.append("**Sources used:**")
-                for src in entry["sources"]:
-                    lines.append(f"- `{src['key']}` — {src['citation'][:80]}")
-                lines.append("")
+                used = _cite_keys(entry["cited_text"])
+                chosen = [s for s in entry["sources"] if s["key"] in used]
+                rejected = [s for s in entry["sources"] if s["key"] not in used]
+
+                if chosen:
+                    lines.append("**Cited:**")
+                    for src in chosen:
+                        lines.append(f"- `{src['key']}` — {src['citation'][:80]}")
+                    lines.append("")
+                if rejected:
+                    lines.append("**Also retrieved, not cited:**")
+                    for src in rejected:
+                        lines.append(f"- `{src['key']}` — {src['citation'][:80]}")
+                    lines.append("")
 
         lines.append("---\n")
 
@@ -226,13 +299,24 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
     needs_cite = [False] * len(sentences)
     if eligible_sentences:
         logger.info("Checking %d eligible sentences for citation need (batched)…", len(eligible_sentences))
-        batch_results = _batch_needs_citation(eligible_sentences)
+        try:
+            batch_results = _batch_needs_citation(eligible_sentences)
+        except Exception as e:
+            # Abort rather than guess. A misaligned verdict list attributes one
+            # sentence's decision to another, and nothing has been written yet,
+            # so stopping here costs no work and avoids a misleading draft.
+            logger.error(
+                "Citation-need check failed after retries: %s\n"
+                "  → Aborting without writing output. Re-run to try again, or "
+                "shorten the draft if the model keeps truncating its reply.", e,
+            )
+            return
         for idx, needs in zip(eligible_indices, batch_results):
             needs_cite[idx] = needs
 
     # ── Process sentences ────────────────────────────────────────────────
     cited_sentences = []
-    citation_mapping = {}
+    key_registry = {}      # every source offered to the model: citation → cite_N
     citation_entries = []  # For the report
     next_cite_idx = 1
 
@@ -259,26 +343,39 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
             continue
 
         context_str = ""
-        sources_used = []
+        candidates = []
         for r in results:
             cit_source = r["metadata"].get("citation_source", "Unknown")
-            if cit_source not in citation_mapping:
-                citation_mapping[cit_source] = f"cite_{next_cite_idx}"
+            # Keys are registered for every retrieved chunk so the model has a
+            # stable label to reference, but registration is NOT the same as
+            # use — the final mapping is filtered down to keys that actually
+            # made it into the draft (see below).
+            if cit_source not in key_registry:
+                key_registry[cit_source] = f"cite_{next_cite_idx}"
                 next_cite_idx += 1
 
-            cite_key = citation_mapping[cit_source]
+            cite_key = key_registry[cit_source]
             context_str += f"--- Context (Cite Key: {cite_key}) ---\n{r['text']}\n\n"
-            sources_used.append({"key": cite_key, "citation": cit_source})
+            candidates.append({"key": cite_key, "citation": cit_source})
 
         try:
             cited_sentence, reasoning = _cite_sentence_with_reasoning(sentence, context_str)
-            logger.info(" -> Cited: %s", cited_sentence[:80])
             cited_sentences.append(cited_sentence)
 
-            entry["cited"] = True
-            entry["cited_text"] = cited_sentence
-            entry["reasoning"] = reasoning
-            entry["sources"] = sources_used
+            # A successful call is not a citation. When the model declines, or
+            # when the response could not be parsed, _cite_sentence_with_reasoning
+            # returns the original sentence unchanged — so decide from the text.
+            if _cite_keys(cited_sentence):
+                logger.info(" -> Cited: %s", cited_sentence[:80])
+                entry["cited"] = True
+                entry["cited_text"] = cited_sentence
+                entry["reasoning"] = reasoning
+                entry["sources"] = candidates
+            else:
+                logger.info(" -> Declined: retrieved context did not support the claim.")
+                entry["skip_reason"] = "context retrieved but the model did not cite it"
+                entry["reasoning"] = reasoning
+                entry["candidates"] = candidates
         except Exception as e:
             logger.error(" -> Error during citing: %s", e)
             cited_sentences.append(sentence)
@@ -293,6 +390,27 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
         f.write(final_draft)
     logger.info("Saved cited draft to %s", out_path)
 
+    # The mapping is the BibTeX input, so it must describe the draft as written.
+    # key_registry holds every source that was offered to the model; only the
+    # keys the model actually used belong here.
+    used_keys = _cite_keys(final_draft)
+    citation_mapping = {
+        source: key for source, key in key_registry.items() if key in used_keys
+    }
+
+    unknown = used_keys - set(key_registry.values())
+    if unknown:
+        logger.warning(
+            "Draft cites %d key(s) that were never offered as context — the model "
+            "likely invented them: %s",
+            len(unknown), ", ".join(sorted(unknown)),
+        )
+
+    logger.info(
+        "%d of %d retrieved sources were actually cited.",
+        len(citation_mapping), len(key_registry),
+    )
+
     mapping_file = out_path.replace(".txt", "_citations.json")
     with open(mapping_file, "w") as f:
         json.dump(citation_mapping, f, indent=4)
@@ -302,7 +420,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
     report_path = out_path.replace(".txt", "_report.md")
     _generate_report(
         file_path, report_path, sentences, cited_sentences,
-        needs_cite, citation_entries, citation_mapping,
+        needs_cite, citation_entries, citation_mapping, key_registry,
     )
 
 
