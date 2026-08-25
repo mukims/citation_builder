@@ -6,7 +6,7 @@ This system extracts reference strings from a base PDF, automatically downloads 
 
 ## System Architecture
 
-The pipeline consists six agents, a shared utility layer, and an intelligent orchestrator backed by a LangGraph supervisor.
+The pipeline consists of seven agents, a shared utility layer, and an intelligent orchestrator backed by a LangGraph supervisor.
 
 ### Core Infrastructure
 
@@ -57,6 +57,12 @@ The pipeline consists six agents, a shared utility layer, and an intelligent orc
 6. **Agent 6: Manual Ingestor (`agent6_manual_ingestor.py`)**:
    - Watches `pulled_pdfs/` for manually dropped PDFs and ingests them directly.
    - Delegates to the same `shared/ingestion.py` pipeline as Agent 3.
+
+### Research Chat
+7. **Agent 7: Research Chat (`agent7_research_chat.py`)**:
+   - A multi-turn conversational RAG agent over the ingested corpus, for brainstorming and literature questions rather than citation insertion.
+   - Retrieves via `shared/search.py` (default `top_k=5`) and streams responses from `CHAT_MODEL` (`qwen2.5:7b`) using the tuned `CHAT_OLLAMA_OPTIONS`.
+   - Supports `/clear`, `/sources`, `/export`, and `/help` session commands.
 
 ### Evaluation
 - **RAG Evaluation (`evaluate_rag.py`)**: Programmatic evaluation of the pipeline's retrieval and generation capabilities. Uses the **Ragas** framework alongside `deepseek-r1:14b` as a judge LLM to evaluate sample queries on metrics such as *Faithfulness* and *Answer Relevancy*.

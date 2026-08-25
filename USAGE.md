@@ -92,6 +92,19 @@ ollama pull qwen2.5:7b
 
 These are large downloads (several GB each). Wait for all three to complete.
 
+### Step 6 — Set your contact email for Unpaywall
+
+Unpaywall (used in step 2 of the paper fetcher) requires a real contact address
+on every request and rejects calls without one. Set it once in your shell:
+
+```
+export UNPAYWALL_EMAIL=you@institution.edu
+```
+
+Add that line to your `~/.bashrc` so it persists across terminals. If you skip
+this, Agent 2 logs a warning and every lookup falls back to the arXiv search,
+which finds far fewer papers.
+
 **Setup complete!** From now on, you only need to run `conda activate rag_prod`
 each time you open a new terminal.
 
@@ -430,3 +443,12 @@ change anything, but here are the key settings if you want to tweak behaviour:
 | Setting | Default | What it controls |
 |---------|---------|-----------------|
 | `DEFAULT_TOP_K` | `3` | Number of matching paper excerpts returned per search |
+
+### Environment Variables
+
+Some settings are read from your shell environment rather than hardcoded, so
+that personal details never end up committed to the repository.
+
+| Variable | Default | What it controls |
+|----------|---------|-----------------|
+| `UNPAYWALL_EMAIL` | `your-email@example.com` | Contact address sent to the Unpaywall API. Unpaywall rejects requests without a real address, so leaving this unset makes Agent 2 skip straight to the arXiv fallback. See Step 6 of the setup. |

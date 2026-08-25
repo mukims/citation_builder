@@ -30,6 +30,13 @@ def _checkpoint(downloaded, failed):
 
 
 def fetch_papers():
+    if UNPAYWALL_EMAIL == "your-email@example.com":
+        logger.warning(
+            "UNPAYWALL_EMAIL is unset — Unpaywall rejects requests without a real "
+            "contact address, so stage 2 will fail and every lookup will fall back "
+            "to arXiv. Export UNPAYWALL_EMAIL=you@institution.edu to fix."
+        )
+
     with open(EXTRACTED_CITATIONS_PATH, "r") as f:
         citations = json.load(f)
         

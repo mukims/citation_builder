@@ -65,7 +65,10 @@ MANUAL_COOLDOWN_SECONDS  = 5
 DEFAULT_WORKERS          = 1
 
 # ─── Agent 2 — Fetcher ───────────────────────────────────────────────────────
-UNPAYWALL_EMAIL    = "researcher123987@gmail.com"
+# Unpaywall requires a contact email on every request. Set UNPAYWALL_EMAIL in
+# your environment; the placeholder below is only a fallback so the pipeline
+# does not silently send someone else's address.
+UNPAYWALL_EMAIL    = os.environ.get("UNPAYWALL_EMAIL", "your-email@example.com")
 MAX_CITATION_LEN   = 500   # Skip citations longer than this (likely malformed)
 ARXIV_RATE_LIMIT   = 3     # Seconds between arXiv requests
 UNPAYWALL_SLEEP    = 0.5   # Courtesy sleep after Unpaywall downloads

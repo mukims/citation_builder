@@ -31,13 +31,13 @@ bm25_index.pkl
 pulled_pdfs/*.pdf
 archive_pulled_pdfs/*.pdf
 # Raw source PDFs (user-provided)
-raw/*.pdf
+raw/**/*.pdf
 
 # Extracted figure images
-../extracted_data/
+images/
 
 # Detectron2 weights
-/model_final.pth
+*.pth
 
 # ── Keep directory structure in git ───────────────────────────────────────────
 !pulled_pdfs/.gitkeep
@@ -49,6 +49,18 @@ raw/*.pdf
 # downloaded.json
 # failed_downloads.json
 # extracted_citations.json
+
+# ── Scraped author metadata (contains personal data) ──────────────────────────
+# metadata_auth.* holds author email addresses harvested from paper front pages.
+# Regenerate locally with text_extraction.ipynb; do not commit.
+metadata_auth.json
+metadata_auth.jsonl
+
+# ── Local agent scaffolding / vendored deps ───────────────────────────────────
+# Google ADK session state (citation_builder_agent/)
+.adk/
+# Vendored detectron2 checkout — install as a dependency instead of committing
+detectron2/
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 logs/
