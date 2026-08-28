@@ -12,7 +12,14 @@ from ragas.run_config import RunConfig
 from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper
 
-from config import LLM_MODEL, EVAL_MODEL, EMBED_MODEL
+from config import (
+    LLM_MODEL,
+    EVAL_MODEL,
+    EMBED_MODEL,
+    SAMPLE_INPUTS_PATH,
+    EVAL_RESULTS_PATH,
+)
+from prompts import CITATION_SUGGESTION_SYSTEM, CITATION_SUGGESTION_USER
 from shared.log import get_logger
 from shared.db import load_search_resources
 from shared.search import hybrid_search
@@ -36,15 +43,9 @@ def get_rag_response(query, collection, bm25, texts, metadatas):
         context_str += f"--- Source {i+1} : Document '{doc_name}' corresponding to citation {cit} ---\n"
         context_str += chunk_text + "\n\n"
 
-    system_prompt = (
-        "You are an academic writing assistant specializing in physics. "
-        "The user will provide a snippet of text they are writing. "
-        "I will provide retrieved scientific context and the precise formal citations those contexts belong to. "
-        "Your task is to rewrite the user snippet inserting the correct citation where structurally appropriate using LaTeX format, "
-        "and explain why that specific citation supports their writing."
-    )
+    system_prompt = CITATION_SUGGESTION_SYSTEM
 
-    user_prompt = f"User Draft Text:\n{query}\n\nRetrieved Context & Formal Citations:\n{context_str}"
+    user_prompt = CITATION_SUGGESTION_USER.format(query=query, context=context_str)
     
     messages = [
         {"role": "system", "content": system_prompt},
@@ -78,7 +79,7 @@ def main():
     collection, bm25, texts, metadatas = load_search_resources()
     
     logger.info("Parsing sample inputs…")
-    queries = parse_inputs("sample_inputs")
+    queries = parse_inputs(SAMPLE_INPUTS_PATH)
     logger.info("Found %d queries to evaluate.", len(queries))
     
     data = {
@@ -119,8 +120,8 @@ def main():
     
     # Save results to CSV
     df = results.to_pandas()
-    df.to_csv("evaluation_results.csv", index=False)
-    logger.info("Detailed results saved to 'evaluation_results.csv'.")
+    df.to_csv(EVAL_RESULTS_PATH, index=False)
+    logger.info("Detailed results saved to %s", EVAL_RESULTS_PATH)
 
 if __name__ == "__main__":
     main()

@@ -2,6 +2,7 @@ import argparse
 import ollama
 
 from config import LLM_MODEL
+from prompts import CITATION_SUGGESTION_SYSTEM, CITATION_SUGGESTION_USER
 from shared.log import get_logger
 from shared.db import load_search_resources
 from shared.search import hybrid_search
@@ -55,15 +56,9 @@ def main():
         print(f" > {cit}")
         
     logger.info("Drafting citation suggestion…")
-    system_prompt = (
-        "You are an academic writing assistant specializing in physics. "
-        "The user will provide a snippet of text they are writing. "
-        "I will provide retrieved scientific context and the precise formal citations those contexts belong to. "
-        "Your task is to rewrite the user snippet inserting the correct citation where structurally appropriate using LaTeX format, "
-        "and explain why that specific citation supports their writing."
-    )
+    system_prompt = CITATION_SUGGESTION_SYSTEM
 
-    user_prompt = f"User Draft Text:\n{args.text}\n\nRetrieved Context & Formal Citations:\n{context}"
+    user_prompt = CITATION_SUGGESTION_USER.format(query=args.text, context=context)
     
     try:
         response = _generate_suggestion(system_prompt, user_prompt)

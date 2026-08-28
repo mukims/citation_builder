@@ -29,6 +29,7 @@ from datetime import datetime
 import ollama
 
 from config import CHAT_MODEL, CHAT_OLLAMA_OPTIONS, DRAFTS_DIR
+from prompts import RESEARCH_CHAT_SYSTEM
 from shared.log import get_logger
 from shared.db import load_search_resources
 from shared.search import hybrid_search
@@ -36,22 +37,7 @@ from shared.retry import retry
 
 logger = get_logger("agent7")
 
-SYSTEM_PROMPT = """\
-You are a knowledgeable research assistant with deep expertise in physics.
-You have access to a curated database of scientific papers that have been
-ingested and indexed. When the researcher asks a question, you will receive
-relevant excerpts from those papers as context.
-
-Your role is to:
-- Help researchers brainstorm and refine their ideas
-- Explain concepts, summarise findings, and identify connections between papers
-- Suggest research directions grounded in the literature you have access to
-- Be honest when the retrieved context doesn't cover a topic — say so clearly
-- Always mention which sources/papers your answer draws from
-
-Keep your tone conversational but scientifically rigorous. Be concise unless
-the researcher asks for detail. When referencing papers, use the citation
-information provided in the context blocks."""
+SYSTEM_PROMPT = RESEARCH_CHAT_SYSTEM
 
 HELP_TEXT = """
 ╔══════════════════════════════════════════════╗

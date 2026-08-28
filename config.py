@@ -34,12 +34,27 @@ BM25_INDEX_PATH  = os.path.join(PROJECT_ROOT, "bm25_index.pkl")
 RAW_DIR          = os.path.join(PROJECT_ROOT, "raw")
 DRAFTS_DIR       = os.path.join(PROJECT_ROOT, "drafts")
 PULLED_PDFS_DIR  = os.path.join(PROJECT_ROOT, "pulled_pdfs")
-IMAGES_DIR       = os.path.abspath(os.path.join(PROJECT_ROOT, "..", "extracted_data", "images"))
+# Figure/table crops written during ingestion. Each crop is handed straight to
+# the VLM and never read back — only the generated description enters the
+# corpus — so this is a debugging artefact, not corpus data, and is safe to
+# delete between runs. It previously resolved to ../extracted_data/images, a
+# sibling of the project, which put the output outside the repo, outside
+# version control and outside any backup taken of it.
+IMAGES_DIR       = os.environ.get(
+    "CITATION_IMAGES_DIR", os.path.join(PROJECT_ROOT, "images")
+)
 
 # ─── Data Files ───────────────────────────────────────────────────────────────
 EXTRACTED_CITATIONS_PATH = os.path.join(PROJECT_ROOT, "extracted_citations.json")
 DOWNLOADED_JSON_PATH     = os.path.join(PROJECT_ROOT, "downloaded.json")
 FAILED_DOWNLOADS_PATH    = os.path.join(PROJECT_ROOT, "failed_downloads.json")
+
+# ─── Evaluation (evaluate_rag.py) ─────────────────────────────────────────────
+# Anchored to the project root: these were bare relative paths, so the
+# evaluation only worked when run from this directory and wrote its output
+# wherever it happened to be invoked from.
+SAMPLE_INPUTS_PATH = os.path.join(PROJECT_ROOT, "sample_inputs")
+EVAL_RESULTS_PATH  = os.path.join(PROJECT_ROOT, "evaluation_results.csv")
 
 # ─── Detectron2 ───────────────────────────────────────────────────────────────
 DETECTRON_WEIGHTS = os.path.join(PROJECT_ROOT, "model_final.pth")

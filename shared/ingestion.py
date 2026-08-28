@@ -47,6 +47,7 @@ from config import (
     SEMANTIC_CHUNKER_TYPE,
     SEMANTIC_CHUNKER_AMOUNT,
 )
+from prompts import FIGURE_DESCRIPTION
 from shared.log import get_logger
 from shared.retry import retry
 from shared.db import get_max_chunk_index
@@ -106,10 +107,8 @@ def describe_figure(image_path: str, fig_type: str, context: str) -> str:
     """Ask the VLM to describe a cropped figure/table image."""
     import ollama
 
-    prompt = (
-        f"You are analysing scientific plots. Describe this {fig_type.lower()}. "
-        f"Extract textual information, data and trends.\n\n"
-        f"Surrounding Document Context:\n{context}. Answer in 3-5 sentences at max."
+    prompt = FIGURE_DESCRIPTION.format(
+        fig_type=fig_type.lower(), context=context
     )
     response = ollama.chat(
         model=LLM_MODEL,

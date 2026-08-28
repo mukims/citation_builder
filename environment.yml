@@ -1,29 +1,58 @@
+# Conda environment for the Citation Agent pipeline.
+#
+#   conda env create -f environment.yml
+#   conda activate rag_prod
+#
+# Versions are pinned. They were previously bare names, which is how the
+# working environment drifted into a state where the pipeline could not run at
+# all: `pip check` reported chromadb unusable because a transitive dependency
+# (referencing -> attrs) had resolved to a version predating an API it needs.
+# Two constraints below exist specifically to prevent that recurring; both are
+# marked.
 name: rag_prod
 channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.10
+  - python>=3.10,<3.13
   - pip
   - pip:
-      - watchdog
-      - requests
-      - chromadb
-      - rank-bm25
-      - pymupdf
-      - opencv-python
-      - numpy
-      - tqdm
-      - layoutparser
-      - langchain-ollama
-      - langchain-experimental
-      - ollama
-      - langgraph
-      - langgraph-prebuilt
-      - langchain-core
-      - ragas
-      - datasets
-      # Note: detectron2 is heavily dependent on your specific PyTorch and CUDA version.
-      # You may need to install it manually following the official guide:
-      # https://detectron2.readthedocs.io/en/latest/tutorials/install.html
-      # Example: python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
+      # ── Constraint fixes ──────────────────────────────────────────────────
+      # referencing and jsonschema (pulled in by chromadb) call attrs.field(alias=…),
+      # added in attrs 22.2.0. An older attrs makes `import chromadb` raise
+      # TypeError, which reads as a missing package but is a version conflict.
+      - attrs>=22.2.0
+      # chromadb and ollama both require httpx>=0.27; an older one breaks both.
+      - httpx>=0.27
+
+      # ── Retrieval and storage ────────────────────────────────────────────
+      - chromadb~=1.4.1
+      - rank-bm25~=0.2.2
+      - numpy~=2.2.6
+
+      # ── Local models ─────────────────────────────────────────────────────
+      - ollama~=0.6.1
+      - langchain-ollama~=1.0.1
+      - langchain-experimental~=0.4.1     # SemanticChunker
+
+      # ── PDF parsing and layout detection ─────────────────────────────────
+      - pymupdf~=1.26.7
+      - opencv-python>=4.8
+      - layoutparser~=0.3.4
+      # layoutparser's Detectron2LayoutModel needs detectron2, which is not on
+      # PyPI and is built against your specific torch/CUDA. Install it after
+      # this environment exists:
+      #     python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
+      # See https://detectron2.readthedocs.io/en/latest/tutorials/install.html
+
+      # ── Orchestration and I/O ────────────────────────────────────────────
+      - watchdog~=6.0.0
+      - requests~=2.32
+      - tqdm~=4.67
+
+      # ── Evaluation only (evaluate_rag.py) ────────────────────────────────
+      # Not needed to run the pipeline. Drop these three if you never run the
+      # Ragas evaluation.
+      - ragas~=0.2
+      - datasets~=5.0.1
+      - pandas~=2.3.3

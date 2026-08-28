@@ -103,21 +103,32 @@ Agent 3 ingests papers that were *automatically downloaded* by Agent 2 (tracked 
 # 1. Install system dependencies
 sudo apt-get install poppler-utils libgl1-mesa-glx libglib2.0-0
 
-# 2. Create and activate the conda environment
+# 2. Create and activate the environment (versions are pinned in the file)
+conda env create -f environment.yml
 conda activate rag_prod
 
-# 3. Install Python packages
-pip install watchdog requests chromadb rank-bm25 \
-            pymupdf opencv-python numpy tqdm \
-            layoutparser detectron2 \
-            langchain-ollama langchain-experimental ollama \
-            langgraph langgraph-prebuilt langchain-core \
-            ragas datasets
+# 3. Install Detectron2 — not on PyPI, and built against your torch/CUDA
+python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
 
 # 4. Pull required Ollama models
 ollama pull gemma4:latest
 ollama pull nomic-embed-text
 ```
+
+Not using conda? `requirements.txt` is the pip equivalent, with
+`requirements-eval.txt` for the extra packages `evaluate_rag.py` needs:
+
+```bash
+python -m pip install -r requirements.txt          # pipeline
+python -m pip install -r requirements-eval.txt     # + Ragas evaluation
+python -m pip install -r requirements-test.txt     # just to run the tests
+```
+
+Install the pinned versions rather than the bare package names. Unpinned
+installs are how this project ended up with a ChromaDB that raised `TypeError`
+on import: a transitive dependency (`referencing` → `attrs`) had resolved to a
+version predating an API it calls. `environment.yml` carries that constraint,
+and the reason for it, in a comment.
 
 ### Where do I get the Detectron2 weights?
 
@@ -390,6 +401,18 @@ UNPAYWALL_EMAIL = "your.email@example.com"
 ```
 
 Using your own institutional email may improve rate limits from the Unpaywall API.
+
+### How do I run the tests?
+
+```bash
+python -m pip install -r requirements-test.txt
+CITATION_LOG_FILE=0 python -m unittest discover -s . -p "test_*.py"
+```
+
+The suite needs only three light packages, not the full ML stack: ChromaDB,
+PyTorch, detectron2 and the LangChain embedding chain are imported lazily
+inside functions the tests never call. `CITATION_LOG_FILE=0` keeps the run from
+appending to the project's own `logs/`. CI runs the same command on every push.
 
 ### How do I contribute or extend the pipeline?
 

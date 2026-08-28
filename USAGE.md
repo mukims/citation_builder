@@ -358,7 +358,7 @@ A Python package is missing. Activate the environment and install it:
 
 ```
 conda activate rag_prod
-pip install watchdog
+python -m pip install -r requirements.txt
 ```
 
 Replace `watchdog` with whatever module name is mentioned in the error.

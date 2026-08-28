@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-test.txt
+
+      - name: Run tests
+        # Console output only — do not write into the project's logs/ directory.
+        env:
+          CITATION_LOG_FILE: "0"
+        run: python -m unittest discover -s . -p "test_*.py" -v
+
+      - name: Check every module still imports
+        # Catches a broken import that no test happens to cover. Modules
+        # needing the ML stack are excluded; CI deliberately does not install it.
+        env:
+          CITATION_LOG_FILE: "0"
+        run: |
+          for m in config prompts shared.log shared.retry shared.db shared.search \
+                   shared.ingestion agent1_extractor agent2_fetcher agent3_ingestor; do
+            python -c "import $m" || exit 1
+          done

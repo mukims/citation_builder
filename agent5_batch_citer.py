@@ -7,6 +7,11 @@ from datetime import datetime
 import ollama
 
 from config import LLM_MODEL
+from prompts import (
+    CITATION_NEED_CHECK,
+    CITE_SENTENCE_SYSTEM,
+    CITE_SENTENCE_USER,
+)
 from shared.log import get_logger
 from shared.db import load_search_resources
 from shared.search import hybrid_search
@@ -67,14 +72,7 @@ def _batch_needs_citation(sentences):
     Returns a list of booleans aligned with the input list.
     """
     numbered = "\n".join(f"{i+1}. {s}" for i, s in enumerate(sentences))
-    prompt = (
-        "Below is a numbered list of sentences from an academic draft.\n"
-        "For EACH sentence, decide whether it states a factual scientific claim "
-        "that requires a citation.\n"
-        "Reply with ONLY a numbered list of YES or NO, one per line. Example:\n"
-        "1. YES\n2. NO\n3. YES\n\n"
-        f"Sentences:\n{numbered}"
-    )
+    prompt = CITATION_NEED_CHECK.format(numbered=numbered)
     response = ollama.chat(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -117,18 +115,8 @@ def _cite_sentence_with_reasoning(sentence, context_str):
     Returns:
         tuple: (cited_sentence, reasoning)
     """
-    sys_prompt = (
-        "You are an expert writing assistant. Below is a sentence and some retrieved context. "
-        "Your job is:\n"
-        "1. Rewrite the sentence by appending a LaTeX citation \\cite{key} if the context supports it. "
-        "You MUST use the exact 'Cite Key' provided in the context blocks.\n"
-        "2. Provide a brief explanation (2-3 sentences) of WHY this citation is appropriate — "
-        "what specific claim in the sentence is supported by the source.\n\n"
-        "Format your response EXACTLY like this:\n"
-        "CITED: <the rewritten sentence with \\cite{key}>\n"
-        "REASON: <2-3 sentence justification>"
-    )
-    user_prompt = f"Sentence: {sentence}\n\nRetrieved Context:\n{context_str}"
+    sys_prompt = CITE_SENTENCE_SYSTEM
+    user_prompt = CITE_SENTENCE_USER.format(sentence=sentence, context=context_str)
 
     response = ollama.chat(
         model=LLM_MODEL,
