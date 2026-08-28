@@ -6,7 +6,7 @@ from datetime import datetime
 
 import ollama
 
-from config import LLM_MODEL
+from config import LLM_MODEL, CITATION_CHECK_BATCH_SIZE
 from prompts import (
     CITATION_NEED_CHECK,
     CITE_SENTENCE_SYSTEM,
@@ -108,6 +108,44 @@ def _batch_needs_citation(sentences):
     return [verdicts[i] for i in range(len(sentences))]
 
 
+def check_citation_need(sentences, batch_size: int = None):
+    """Decide which of *sentences* need a citation, a batch at a time.
+
+    Returns:
+        tuple: ``(verdicts, failed_batches)``. Each verdict is True, False, or
+        None where the model's reply could not be parsed after retries.
+
+    None is a real third outcome, not a default. The check either says a
+    sentence needs support, says it does not, or fails to say — and folding
+    that last case into "no citation needed" would silently drop claims from
+    the draft that nobody ever judged. Callers must handle it explicitly.
+
+    Batching exists for blast radius. A single request covering the whole draft
+    means one unparseable reply costs the entire run; at this size it costs one
+    batch, and the rest of the draft is still processed.
+    """
+    batch_size = batch_size or CITATION_CHECK_BATCH_SIZE
+    verdicts: list = []
+    failed_batches = 0
+    total = (len(sentences) + batch_size - 1) // batch_size
+
+    for n, start in enumerate(range(0, len(sentences), batch_size), 1):
+        batch = sentences[start : start + batch_size]
+        logger.info("Citation-need check: batch %d/%d (%d sentences)…", n, total, len(batch))
+        try:
+            verdicts.extend(_batch_needs_citation(batch))
+        except Exception as e:
+            failed_batches += 1
+            logger.error(
+                "Citation-need check failed for batch %d/%d: %s\n"
+                "  → Those %d sentence(s) are left unjudged and will not be cited.",
+                n, total, e, len(batch),
+            )
+            verdicts.extend([None] * len(batch))
+
+    return verdicts, failed_batches
+
+
 @retry(max_retries=3, backoff=2.0)
 def _cite_sentence_with_reasoning(sentence, context_str):
     """Ask the LLM to rewrite a sentence with \\cite{key} and explain why.
@@ -176,14 +214,22 @@ def _generate_report(
     # These three are mutually exclusive and cover every sentence, so a reader
     # can see at a glance how often the pipeline wanted a citation and failed
     # to produce one — previously indistinguishable from "none needed".
+    # Compared against `is False` / `is True` rather than truthiness: a verdict
+    # of None means the check failed for that sentence's batch, and `not None`
+    # would quietly file it under "no citation needed" — the exact conflation
+    # this breakdown exists to prevent.
     n_cited = sum(1 for e in citation_entries if e.get("cited"))
     n_not_needed = sum(
         1 for i, e in enumerate(citation_entries)
-        if not e.get("cited") and not needs_cite[i]
+        if not e.get("cited") and needs_cite[i] is False
     )
     n_declined = sum(
         1 for i, e in enumerate(citation_entries)
-        if not e.get("cited") and needs_cite[i]
+        if not e.get("cited") and needs_cite[i] is True
+    )
+    n_undetermined = sum(
+        1 for i, e in enumerate(citation_entries)
+        if not e.get("cited") and needs_cite[i] is None
     )
 
     lines = [
@@ -193,10 +239,11 @@ def _generate_report(
         "## Summary\n",
         f"| Metric | Value |",
         f"|--------|-------|",
-        f"| Total sentences | {n_cited + n_not_needed + n_declined} |",
+        f"| Total sentences | {n_cited + n_not_needed + n_declined + n_undetermined} |",
         f"| Cited | {n_cited} |",
         f"| No citation needed | {n_not_needed} |",
         f"| **Needed a citation, none made** | **{n_declined}** |",
+        f"| **Not judged (check failed)** | **{n_undetermined}** |",
         f"| Unique sources cited | {len(citation_mapping)} |",
         f"| Sources retrieved but never cited | {len(key_registry) - len(citation_mapping)} |",
         "",
@@ -294,21 +341,33 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
     eligible_indices = [i for i, s in enumerate(sentences) if len(s.split()) >= 4]
     eligible_sentences = [sentences[i] for i in eligible_indices]
 
+    # False for sentences too short to be a claim; the check fills in the rest.
     needs_cite = [False] * len(sentences)
     if eligible_sentences:
-        logger.info("Checking %d eligible sentences for citation need (batched)…", len(eligible_sentences))
-        try:
-            batch_results = _batch_needs_citation(eligible_sentences)
-        except Exception as e:
-            # Abort rather than guess. A misaligned verdict list attributes one
-            # sentence's decision to another, and nothing has been written yet,
-            # so stopping here costs no work and avoids a misleading draft.
+        logger.info(
+            "Checking %d eligible sentence(s) for citation need…", len(eligible_sentences)
+        )
+        batch_results, failed_batches = check_citation_need(eligible_sentences)
+
+        if failed_batches and all(v is None for v in batch_results):
+            # Nothing was judged, so there is no draft to write that would mean
+            # anything. Stopping costs no work — nothing has been written yet.
             logger.error(
-                "Citation-need check failed after retries: %s\n"
-                "  → Aborting without writing output. Re-run to try again, or "
-                "shorten the draft if the model keeps truncating its reply.", e,
+                "Every citation-need batch failed. Aborting without writing output. "
+                "Re-run to try again, or lower CITATION_CHECK_BATCH_SIZE if the "
+                "model keeps truncating its reply."
             )
             return None
+
+        if failed_batches:
+            undetermined = sum(1 for v in batch_results if v is None)
+            logger.warning(
+                "%d of %d batches failed — %d sentence(s) left unjudged. They are "
+                "reported separately rather than counted as needing no citation.",
+                failed_batches, (len(eligible_sentences) + CITATION_CHECK_BATCH_SIZE - 1)
+                // CITATION_CHECK_BATCH_SIZE, undetermined,
+            )
+
         for idx, needs in zip(eligible_indices, batch_results):
             needs_cite[idx] = needs
 
@@ -321,6 +380,15 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
     for i, sentence in enumerate(sentences):
         logger.info("[%d/%d] %s", i + 1, len(sentences), sentence[:80])
         entry = {"original": sentence, "cited": False}
+
+        if needs_cite[i] is None:
+            # The check could not judge this one. Leave it alone and say so —
+            # treating it as "no citation needed" would bury the failure.
+            logger.info(" -> Citation need undetermined, leaving unchanged.")
+            cited_sentences.append(sentence)
+            entry["skip_reason"] = "citation-need check failed for this batch"
+            citation_entries.append(entry)
+            continue
 
         if not needs_cite[i]:
             reason = "too short" if len(sentence.split()) < 4 else "no citation needed"

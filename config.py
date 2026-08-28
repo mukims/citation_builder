@@ -71,6 +71,12 @@ EMBED_MAX_CHARS          = 4000     # Truncate documents to this length before e
 SEMANTIC_CHUNKER_TYPE    = "percentile"
 SEMANTIC_CHUNKER_AMOUNT  = 90       # 90th percentile breakpoint
 
+# ─── Agent 5 — Batch Citer ────────────────────────────────────────────────────
+# Sentences per citation-need request. One request for a whole draft makes the
+# entire run hostage to a single malformed reply; smaller batches confine that
+# to the batch. Too small wastes calls, since each one re-sends the framing.
+CITATION_CHECK_BATCH_SIZE = 20
+
 # ─── Search Tunables ──────────────────────────────────────────────────────────
 RRF_K            = 60               # Reciprocal Rank Fusion constant
 DEFAULT_TOP_K    = 3                # Default number of results to return
