@@ -312,8 +312,13 @@ Here is what each folder and important file does:
 |
 |-- physics_vectordb/     The searchable database (created automatically)
 |-- bm25_index.pkl        Text search index (created automatically)
+|-- images/               Figure crops from ingestion. Written, described by
+|                             the vision model, then never read again — safe
+|                             to delete whenever you like
 |-- logs/                 Log files (check here if something goes wrong)
+|-- attic/                Kept for reference, wired into nothing
 |-- config.py             Settings file (model names, timing, etc.)
+`-- prompts.py            Every prompt sent to a model
 ```
 
 ---
@@ -405,6 +410,7 @@ cd ~/citation_builder
 | Ingest downloaded papers into the database | `python agent3_ingestor.py` |
 | Get a citation for a single sentence | `python agent4_assistant.py --text "Your sentence here."` |
 | Cite an entire draft file | `python agent5_batch_citer.py --file drafts/my_draft.txt` |
+| Ingest one PDF you added by hand | `python agent6_manual_ingestor.py --once pulled_pdfs/paper.pdf` |
 | Start the research chat on its own | `python agent7_research_chat.py` |
 
 Run them in order: Agent 1 first, then 2, then 3. After that, Agents 4 and 5
@@ -456,3 +462,6 @@ that personal details never end up committed to the repository.
 | Variable | Default | What it controls |
 |----------|---------|-----------------|
 | `UNPAYWALL_EMAIL` | `your-email@example.com` | Contact address sent to the Unpaywall API. Unpaywall rejects requests without a real address, so leaving this unset makes Agent 2 skip straight to the arXiv fallback. See Step 6 of the setup. |
+| `CITATION_IMAGES_DIR` | `images/` | Where figure crops go during ingestion. Each crop is described by the vision model and then never read again, so this folder is a debugging aid — delete it whenever you like. |
+| `CITATION_LOG_DIR` | `logs/` | Where the rotating log file is written. |
+| `CITATION_LOG_FILE` | `1` | Set to `0` to log to the console only and leave no file behind. |

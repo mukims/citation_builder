@@ -40,6 +40,11 @@ All model names are configured in `config.py` and can be changed in one place.
 | 4 — Assistant | `agent4_assistant.py` | Interactive CLI for single-sentence citation suggestions |
 | 5 — Batch Citer | `agent5_batch_citer.py` | Automated full-draft citation processor that outputs `\cite{key}` tagged text |
 | 6 — Manual Ingestor | `agent6_manual_ingestor.py` | Watches `pulled_pdfs/` for manually dropped PDFs and ingests them directly |
+| 7 — Research Chat | `agent7_research_chat.py` | Multi-turn conversational RAG over the ingested corpus, for exploring the literature rather than citing a draft |
+
+Agents 1–3 and 6 build the corpus; 4, 5 and 7 are three interfaces onto it. Only
+5 (cite a draft) and 7 (ask questions) are end goals — 4 is the single-sentence
+form of 5.
 
 ### What happened to the LangGraph supervisor?
 
@@ -72,19 +77,32 @@ The `shared/` directory contains reusable utilities that all agents import:
 
 | Module | Purpose |
 |--------|---------|
-| `shared/ingestion.py` | PDF processing (Detectron2 layout + VLM), ChromaDB upsert, BM25 rebuild |
+| `shared/ingestion.py` | `ingest_pdfs()` — the one ingestion path (process → upsert → mark → index) — over Detectron2 layout + VLM processing, ChromaDB upsert and BM25 rebuild |
 | `shared/search.py` | Hybrid search with singleton embeddings and RRF fusion |
 | `shared/db.py` | ChromaDB + BM25 loading (replaces duplicated boilerplate in 3 agents) |
 | `shared/retry.py` | Exponential-backoff retry decorator for Ollama calls |
-| `shared/log.py` | Centralised logging to console + rotating log file |
+| `shared/log.py` | Centralised logging: console, plus a rotating file opened lazily so importing a module writes nothing |
 
 ### What is `config.py`?
 
-A single file containing every model name, file path, directory path, and tunable constant in the pipeline. Instead of editing 5+ files to change a model, you edit one line in `config.py`.
+A single file containing every model name, file path, directory path, and tunable constant in the pipeline. Instead of editing 5+ files to change a model, you edit one line in `config.py`. Prompts live separately, in `prompts.py`.
+
+### What environment variables does it read?
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `UNPAYWALL_EMAIL` | *(placeholder)* | Contact address Unpaywall requires on every request. Without it stage 2 fails and every lookup falls back to arXiv. |
+| `CITATION_IMAGES_DIR` | `images/` | Where figure crops are written during ingestion. |
+| `CITATION_LOG_DIR` | `logs/` | Where the rotating log file goes. |
+| `CITATION_LOG_FILE` | `1` | `0` for console-only logging — useful when running tests. |
+
+Everything else is a constant in `config.py`.
 
 ### Why is Agent 6 separate from Agent 3?
 
-Agent 3 ingests papers that were *automatically downloaded* by Agent 2 (tracked in `downloaded.json`). Agent 6 exists for papers that Agent 2 **couldn't** fetch — for example, paywalled papers you downloaded manually. Agent 6 watches `pulled_pdfs/` and ingests any PDF dropped there without requiring a corresponding entry in `downloaded.json`.
+They differ only in where the work comes from. Agent 3 ingests papers Agent 2 *automatically downloaded* (tracked in `downloaded.json`). Agent 6 exists for papers Agent 2 **couldn't** fetch — a paywalled paper you downloaded yourself — and ingests anything dropped into `pulled_pdfs/` without needing an entry in `downloaded.json`.
+
+The ingestion itself is not duplicated: both call `shared.ingestion.ingest_pdfs()`, as does the orchestrator. That matters because the bookkeeping has to agree — processing is the most expensive step in the pipeline, so a PDF that gets parsed but never recorded is re-parsed on every subsequent run.
 
 ---
 
