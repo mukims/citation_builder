@@ -10,7 +10,6 @@ singleton instance across many calls (critical for Agent 5's per-sentence loop).
 import re
 
 import numpy as np
-from langchain_ollama import OllamaEmbeddings
 
 from config import EMBED_MODEL, RRF_K, DEFAULT_TOP_K
 from shared.log import get_logger
@@ -25,6 +24,10 @@ _embeddings_singleton = None
 def _get_embeddings():
     global _embeddings_singleton
     if _embeddings_singleton is None:
+        # Imported here so callers that pass their own embeddings model — and
+        # tests that pass neither — do not need the LangChain stack installed.
+        from langchain_ollama import OllamaEmbeddings
+
         _embeddings_singleton = OllamaEmbeddings(model=EMBED_MODEL)
     return _embeddings_singleton
 
@@ -64,7 +67,15 @@ def hybrid_search(
     # 1. Sparse (BM25) retrieval
     tokenized_query = re.findall(r'\w+', query.lower())
     bm25_scores = bm25.get_scores(tokenized_query)
-    sparse_top_indices = np.argsort(bm25_scores)[::-1][:k_cand]
+
+    # Only the top k_cand matter, so partition instead of sorting the whole
+    # corpus. Agent 5 calls this once per sentence needing a citation, and a
+    # full argsort is O(n log n) over every chunk in the database each time.
+    if k_cand < len(bm25_scores):
+        top_unordered = np.argpartition(bm25_scores, -k_cand)[-k_cand:]
+        sparse_top_indices = top_unordered[np.argsort(bm25_scores[top_unordered])[::-1]]
+    else:
+        sparse_top_indices = np.argsort(bm25_scores)[::-1]
 
     # 2. Dense (embedding) retrieval
     query_emb = embeddings_model.embed_query(query)
@@ -74,13 +85,27 @@ def hybrid_search(
         include=["documents", "metadatas", "distances"],
     )
 
+    # The integer in a "chunk_N" id doubles as the position of that chunk in
+    # `texts`, because both the BM25 corpus and `texts` are built by sorting the
+    # collection on that same integer. That holds only while the ids are
+    # contiguous from zero, which is true by construction (they are assigned
+    # sequentially and never deleted) but is not enforced anywhere. Anything out
+    # of range is dropped rather than silently indexing the wrong chunk.
     dense_ids_ordered = []
     if dense_results["ids"] and dense_results["ids"][0]:
         for id_str in dense_results["ids"][0]:
             try:
-                dense_ids_ordered.append(int(id_str.split("_")[1]))
+                idx = int(id_str.split("_")[1])
             except (ValueError, IndexError):
-                pass
+                continue
+            if 0 <= idx < len(texts):
+                dense_ids_ordered.append(idx)
+            else:
+                logger.warning(
+                    "Dense hit %s is outside the %d loaded chunks — the id space "
+                    "and the BM25 ordering have diverged; rebuild the index.",
+                    id_str, len(texts),
+                )
 
     # 3. Reciprocal Rank Fusion
     fused_scores = {}
@@ -96,7 +121,10 @@ def hybrid_search(
     for idx, rrf_score in ranked:
         if idx < len(texts):
             results.append({
-                "chunk_index": idx,
+                # Cast: sparse indices arrive as numpy integers and dense ones
+                # as Python ints, so the field's type depended on which
+                # retriever surfaced the chunk.
+                "chunk_index": int(idx),
                 "text": texts[idx],
                 "metadata": metadatas[idx] if idx < len(metadatas) else {},
                 "rrf_score": round(rrf_score, 5),

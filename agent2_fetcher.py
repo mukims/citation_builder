@@ -21,6 +21,47 @@ from shared.log import get_logger
 logger = get_logger("agent2")
 
 
+def _safe_component(text: str, limit: int) -> str:
+    """Filesystem-safe slug of *text*, truncated to *limit* characters."""
+    return re.sub(r"[^a-zA-Z0-9_\-]", "_", text)[:limit].strip("_")
+
+
+def paper_filename(title: str, doi: str | None = None, arxiv_id: str | None = None) -> str:
+    """Return a filename identifying the *paper*, stable across runs.
+
+    The name is derived from the work's own identity — its DOI, else its arXiv
+    id, else its title — so two citation strings that resolve to the same paper
+    produce the same filename and the second lookup reuses the first download.
+
+    The previous scheme appended the citation's position in the fetch queue,
+    which is recomputed every run because the queue only holds citations not yet
+    resolved. The same reference formatted two ways in two source papers (or
+    across two runs) therefore landed under two names, and each copy was fetched
+    over the network and then fully re-parsed — layout detection on every page
+    plus a VLM call per figure. It also gave Agent 5 two different cite keys for
+    one paper, so a draft could cite the same work twice under different labels.
+    """
+    # Lower-cased so that a title returned with different capitalisation or
+    # trailing punctuation still resolves to one file. The identifier that
+    # follows is what actually guarantees distinct papers stay distinct; the
+    # title is there to keep filenames and logs readable. This also matches
+    # shared.ingestion.pdf_key(), which lower-cases the document identity.
+    stem = _safe_component(title.lower(), 50) if title and title != "Unknown" else "untitled"
+    if doi:
+        return f"{stem}_{_safe_component(doi, 40)}.pdf"
+    if arxiv_id:
+        return f"{stem}_arxiv_{_safe_component(arxiv_id, 30)}.pdf"
+    return f"{stem}.pdf"
+
+
+def _arxiv_id_from_entry(entry, ns) -> str | None:
+    """Pull the bare arXiv id (e.g. "1234.5678v1") out of an atom entry."""
+    node = entry.find("atom:id", ns)
+    if node is None or not node.text:
+        return None
+    return node.text.rstrip("/").split("/")[-1]
+
+
 def _checkpoint(downloaded, failed):
     """Write state to disk after every paper — crash-safe incremental saves."""
     with open(DOWNLOADED_JSON_PATH, "w") as f:
@@ -104,17 +145,29 @@ def fetch_papers():
                         pdf_url = u_data["best_oa_location"].get("url_for_pdf")
                         if pdf_url:
                             # 3. Download the PDF
-                            pdf_res = requests.get(pdf_url, stream=True, timeout=15)
-                            if pdf_res.status_code == 200:
-                                safe_title = re.sub(r'[^a-zA-Z0-9_\-]', '_', title)[:50]
-                                filename = os.path.join(PULLED_PDFS_DIR, f"{safe_title}_{i}.pdf")
+                            filename = os.path.join(
+                                PULLED_PDFS_DIR, paper_filename(title, doi=doi)
+                            )
+                            if os.path.exists(filename):
+                                # Another citation already resolved to this paper.
+                                logger.info(
+                                    " --> Already fetched as %s — reusing.",
+                                    os.path.basename(filename),
+                                )
+                                downloaded.setdefault(filename, citation)
+                                pdf_saved = True
+                                pdf_res = None
+                            else:
+                                pdf_res = requests.get(pdf_url, stream=True, timeout=15)
+
+                            if pdf_res is not None and pdf_res.status_code == 200:
                                 with open(filename, "wb") as pdf_file:
                                     for chunk in pdf_res.iter_content(chunk_size=8192):
                                         pdf_file.write(chunk)
                                 downloaded[filename] = citation
                                 logger.info(" --> SUCCESS! Saved to %s", filename)
                                 pdf_saved = True
-                            else:
+                            elif pdf_res is not None:
                                 fail_reason = f"PDF download link failed (status {pdf_res.status_code})"
                         else:
                             fail_reason = "Open Access, but no direct PDF URL"
@@ -140,6 +193,7 @@ def fetch_papers():
                     
                     if entries:
                         entry = entries[0]
+                        arxiv_id = _arxiv_id_from_entry(entry, ns)
                         pdf_link = None
                         for link in entry.findall('atom:link', ns):
                             if link.attrib.get('title') == 'pdf':
@@ -151,19 +205,31 @@ def fetch_papers():
                             if not pdf_link.endswith('.pdf'):
                                 pdf_link += '.pdf'
                                 
-                            a_res = requests.get(pdf_link, stream=True, timeout=15)
-                            if a_res.status_code == 200:
-                                safe_title = re.sub(r'[^a-zA-Z0-9_\-]', '_', title)[:50]
-                                filename = os.path.join(PULLED_PDFS_DIR, f"{safe_title}_{i}_arxiv.pdf")
+                            filename = os.path.join(
+                                PULLED_PDFS_DIR,
+                                paper_filename(title, doi=doi, arxiv_id=arxiv_id),
+                            )
+                            if os.path.exists(filename):
+                                logger.info(
+                                    " --> Already fetched as %s — reusing.",
+                                    os.path.basename(filename),
+                                )
+                                downloaded.setdefault(filename, citation)
+                                pdf_saved = True
+                                a_res = None
+                            else:
+                                a_res = requests.get(pdf_link, stream=True, timeout=15)
+
+                            if a_res is not None and a_res.status_code == 200:
                                 with open(filename, "wb") as pdf_file:
                                     for chunk in a_res.iter_content(chunk_size=8192):
                                         pdf_file.write(chunk)
-                                        
+
                                 downloaded[filename] = citation
                                 logger.info(" --> SUCCESS via arXiv! Saved to %s", filename)
                                 pdf_saved = True
                                 time.sleep(ARXIV_RATE_LIMIT)
-                            else:
+                            elif a_res is not None:
                                 fail_reason = f"{fail_reason} | arXiv PDF download failed"
                         else:
                             fail_reason = f"{fail_reason} | No PDF link on arXiv"

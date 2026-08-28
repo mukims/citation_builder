@@ -298,7 +298,11 @@ Here is what each folder and important file does:
 ~/citation_builder/
 |
 |-- raw/                  <-- DROP source PDFs here (the system reads their
-|                             reference lists)
+|   |                         reference lists)
+|   |-- processed/        Source PDFs whose references were read successfully
+|   `-- failed/           Source PDFs that yielded no references — usually a
+|                             scan with no text layer, or a reference list in
+|                             a format the patterns do not recognise
 |
 |-- pulled_pdfs/          <-- DROP individual PDFs here to add them directly
 |                             (also where auto-downloaded papers go)

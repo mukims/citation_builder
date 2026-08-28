@@ -95,7 +95,11 @@ def get_max_chunk_index(collection) -> int:
     max_idx = -1
     limit, offset = 5000, 0
     while True:
-        batch = collection.get(limit=limit, offset=offset)
+        # include=[] fetches ids only. The ChromaDB default is
+        # ["metadatas", "documents"], so without this the whole corpus — every
+        # chunk's text and metadata — was pulled across the wire and discarded
+        # just to read the largest id.
+        batch = collection.get(limit=limit, offset=offset, include=[])
         if not batch or not batch["ids"]:
             break
         for cid in batch["ids"]:
