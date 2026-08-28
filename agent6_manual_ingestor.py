@@ -34,7 +34,7 @@ except ImportError:
 
 from config import PULLED_PDFS_DIR, MANUAL_COOLDOWN_SECONDS
 from shared.log import get_logger
-from shared.ingestion import process_pdf, upsert_corpus, rebuild_bm25
+from shared.ingestion import ingest_pdfs
 
 logger = get_logger("agent6")
 
@@ -46,35 +46,26 @@ def ingest_manual_pdf(pdf_path: str, citation_string: str | None = None, workers
     """
     Ingest a single manually placed PDF into the ChromaDB vector database.
 
+    Delegates to the shared ingestion path, so a PDF dropped here is subject to
+    the same already-ingested check and manifest bookkeeping as one that arrives
+    via Agent 3 — re-dropping a paper no longer re-runs layout detection and the
+    VLM over every page of it.
+
     Args:
         pdf_path:        Absolute or relative path to the PDF file.
         citation_string: Optional citation/reference label to tag the document with.
                          If None, the PDF filename (without extension) is used.
-        workers:         Unused here (kept for API compatibility), always single-file.
-    """
-    if not os.path.exists(pdf_path):
-        logger.error("File not found: %s", pdf_path)
-        return
+        workers:         Worker processes for the parsing stage (single file, so
+                         this is only useful if the file is very large).
 
+    Returns:
+        dict: The result summary from :func:`shared.ingestion.ingest_pdfs`.
+    """
     if citation_string is None:
         citation_string = os.path.splitext(os.path.basename(pdf_path))[0]
 
-    logger.info("Processing: %s", pdf_path)
-    logger.info("Citation label: '%s'", citation_string)
-
-    # Step 1: Detectron2 layout detection + VLM figure description
-    corpus = process_pdf(pdf_path, citation_string)
-
-    if not corpus:
-        logger.warning("No content extracted from %s. Aborting.", pdf_path)
-        return
-
-    # Step 2: Semantic chunking + ChromaDB upsert
-    inserted = upsert_corpus(corpus)
-    logger.info("Inserted %d chunks from '%s'.", inserted, pdf_path)
-
-    # Step 3: Rebuild BM25 index
-    rebuild_bm25()
+    logger.info("Ingesting %s (citation label: '%s')", pdf_path, citation_string)
+    return ingest_pdfs({pdf_path: citation_string}, workers=workers)
 
 
 # ─── Watchdog Handler ─────────────────────────────────────────────────────────

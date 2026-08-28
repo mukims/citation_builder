@@ -1,10 +1,16 @@
 """
-Shared ingestion pipeline — used by both Agent 3 and Agent 6.
+Shared ingestion pipeline — the single implementation used by Agent 3, Agent 6
+and the orchestrator.
 
 Provides:
+    - ingest_pdfs()     — Batch ingest: process → upsert → mark → index.
+                          Callers should use this rather than composing the
+                          steps below themselves, so the check/mark bookkeeping
+                          stays consistent across entry points.
     - process_pdf()     — Detectron2 layout detection + VLM figure description
     - upsert_corpus()   — Semantic chunking + ChromaDB upsert
     - rebuild_bm25()    — Full BM25 index rebuild from the collection
+    - pdf_key()         — Normalised document identity used by both stores
 """
 
 import os
@@ -12,20 +18,16 @@ import re
 import pickle
 import time
 import warnings
-from tqdm import tqdm
+import concurrent.futures
 
 warnings.filterwarnings("ignore", message=".*torch.meshgrid.*")
 
-import cv2
-import fitz
-import numpy as np
-import ollama
-import chromadb
-from rank_bm25 import BM25Okapi
-import layoutparser as lp
-
-from langchain_ollama import OllamaEmbeddings
-from langchain_experimental.text_splitter import SemanticChunker
+# The heavy dependencies below (Detectron2/layoutparser, OpenCV, PyMuPDF,
+# ChromaDB, the LangChain embedding stack) are imported inside the functions
+# that use them rather than at module scope. Importing this module should not
+# require the whole ML stack: the batch bookkeeping in ingest_pdfs() and the
+# text helpers are ordinary Python, and keeping them importable on their own is
+# what makes them testable without a GPU-capable environment.
 
 from config import (
     VECTORDB_PATH,
@@ -102,6 +104,8 @@ def clean_text(text):
 @retry(max_retries=3, backoff=2.0)
 def describe_figure(image_path: str, fig_type: str, context: str) -> str:
     """Ask the VLM to describe a cropped figure/table image."""
+    import ollama
+
     prompt = (
         f"You are analysing scientific plots. Describe this {fig_type.lower()}. "
         f"Extract textual information, data and trends.\n\n"
@@ -125,6 +129,8 @@ _detectron_model_cache = {}
 
 def _get_detectron_model(weights_path):
     """Return a cached Detectron2 model (loaded once per unique weights path)."""
+    import layoutparser as lp
+
     if weights_path not in _detectron_model_cache:
         logger.debug("Loading Detectron2 model from %s…", weights_path)
         _detectron_model_cache[weights_path] = lp.Detectron2LayoutModel(
@@ -152,6 +158,11 @@ def process_pdf(pdf_path: str, citation_string: str, detectron_weights=None, ima
     Returns:
         list[dict]: Corpus entries (text blocks + figure descriptions).
     """
+    import cv2
+    import fitz
+    import numpy as np
+    from tqdm import tqdm
+
     detectron_weights = detectron_weights or DETECTRON_WEIGHTS
     images_dir = images_dir or IMAGES_DIR
     os.makedirs(images_dir, exist_ok=True)
@@ -169,7 +180,7 @@ def process_pdf(pdf_path: str, citation_string: str, detectron_weights=None, ima
     try:
         pdf = fitz.open(pdf_path)
         doc_name = os.path.basename(pdf_path)
-        pdf_name = doc_name.strip().replace(" ", "_").lower()
+        pdf_name = pdf_key(pdf_path)
         num_pages = len(pdf)
 
         for page_idx in tqdm(range(num_pages), desc=f"Parsing {doc_name}", leave=False):
@@ -252,6 +263,10 @@ def upsert_corpus(corpus: list[dict]):
     if not corpus:
         logger.info("Empty corpus — nothing to ingest.")
         return 0
+
+    import chromadb
+    from langchain_ollama import OllamaEmbeddings
+    from langchain_experimental.text_splitter import SemanticChunker
 
     t0 = time.perf_counter()
     logger.info("Initializing chunker and embedding model…")
@@ -378,6 +393,8 @@ def get_ingested_documents(collection=None) -> set[str]:
                     docs.add(line.strip())
 
     if collection is None:
+        import chromadb
+
         chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
         try:
             collection = chroma_client.get_collection(name=COLLECTION_NAME)
@@ -396,6 +413,17 @@ def get_ingested_documents(collection=None) -> set[str]:
         
     return docs
 
+def pdf_key(pdf_path: str) -> str:
+    """Return the normalised document key for *pdf_path*.
+
+    This is the identity a PDF has everywhere in the system: the ``document``
+    field written into ChromaDB metadata, and the line written to the ingestion
+    manifest. It was previously re-derived inline in four separate places, so a
+    change in one would silently stop matching the others.
+    """
+    return os.path.basename(pdf_path).strip().replace(" ", "_").lower()
+
+
 def mark_document_ingested(pdf_name: str):
     """Mark a document as processed so it's not re-ingested."""
     os.makedirs(VECTORDB_PATH, exist_ok=True)
@@ -409,6 +437,9 @@ def mark_document_ingested(pdf_name: str):
 
 def rebuild_bm25():
     """Rebuild the BM25 index from the entire ChromaDB collection."""
+    import chromadb
+    from rank_bm25 import BM25Okapi
+
     t0 = time.perf_counter()
     logger.info("Rebuilding BM25 index…")
     chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
@@ -435,3 +466,112 @@ def rebuild_bm25():
         pickle.dump(bm25, f)
     elapsed = time.perf_counter() - t0
     logger.info("✓ BM25 index rebuilt (%d documents) in %.1fs.", len(texts), elapsed)
+
+
+# ─── Unified batch ingestion ──────────────────────────────────────────────────
+
+
+def ingest_pdfs(
+    pdfs,
+    workers: int = 1,
+    skip_ingested: bool = True,
+    rebuild_index: bool = True,
+    log_prefix: str = "",
+) -> dict:
+    """Ingest a batch of PDFs: process → upsert → mark → rebuild the BM25 index.
+
+    This is the single ingestion path shared by Agent 3 (batch from
+    downloaded.json), Agent 6 (one manually placed file) and the orchestrator
+    (startup sync and the pulled_pdfs/ watcher).
+
+    Having one implementation matters because the check/mark bookkeeping has to
+    agree across callers. Processing is by far the most expensive step in the
+    pipeline — layout detection on every page plus a VLM call per figure — so a
+    PDF that gets processed but never marked is re-processed in full on every
+    subsequent run, and one that gets marked but never checked is processed
+    twice in the same run.
+
+    Args:
+        pdfs:          Mapping of ``{pdf_path: citation_label}``, or an iterable
+                       of paths (the filename stem is then used as the label).
+        workers:       Worker processes for the parsing stage. 1 runs in-process
+                       and reuses the cached Detectron2 model.
+        skip_ingested: Skip PDFs already recorded as ingested.
+        rebuild_index: Rebuild the BM25 index once at the end. Pass False when
+                       ingesting several batches and rebuild once yourself.
+        log_prefix:    Prefix for log lines, e.g. ``"[Sync] "``.
+
+    Returns:
+        dict: ``{"processed", "skipped", "inserted", "failed"}`` — ``failed``
+        is the list of paths that could not be read.
+    """
+    if not isinstance(pdfs, dict):
+        pdfs = {p: os.path.splitext(os.path.basename(p))[0] for p in pdfs}
+
+    result = {"processed": 0, "skipped": 0, "inserted": 0, "failed": []}
+
+    candidates = {}
+    for path, label in pdfs.items():
+        if os.path.exists(path):
+            candidates[path] = label
+        else:
+            logger.warning("%sFile not found, skipping: %s", log_prefix, path)
+            result["failed"].append(path)
+
+    if skip_ingested and candidates:
+        already = get_ingested_documents()
+        remaining = {p: l for p, l in candidates.items() if pdf_key(p) not in already}
+        result["skipped"] = len(candidates) - len(remaining)
+        if result["skipped"]:
+            logger.info(
+                "%sSkipping %d already-ingested PDF(s); %d to process.",
+                log_prefix, result["skipped"], len(remaining),
+            )
+        candidates = remaining
+
+    if not candidates:
+        logger.info("%sNothing to ingest.", log_prefix)
+        return result
+
+    corpus = []
+    if workers <= 1:
+        logger.info("%sProcessing %d PDF(s) sequentially…", log_prefix, len(candidates))
+        for i, (path, label) in enumerate(candidates.items(), 1):
+            logger.info("%s[%d/%d] %s", log_prefix, i, len(candidates), os.path.basename(path))
+            corpus.extend(process_pdf(path, label))
+    else:
+        logger.info(
+            "%sProcessing %d PDF(s) with %d workers…", log_prefix, len(candidates), workers
+        )
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(process_pdf, path, label): path
+                for path, label in candidates.items()
+            }
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    corpus.extend(future.result())
+                except Exception as e:
+                    logger.error("%sWorker failed on %s: %s", log_prefix, futures[future], e)
+                    result["failed"].append(futures[future])
+
+    result["processed"] = len(candidates)
+
+    if corpus:
+        result["inserted"] = upsert_corpus(corpus)
+        logger.info("%sInserted %d new chunk(s).", log_prefix, result["inserted"])
+    else:
+        logger.info("%sNo content extracted from the processed PDF(s).", log_prefix)
+
+    # Mark every PDF that was attempted, including ones that yielded nothing.
+    # A corrupt, empty, or duplicate paper produces no new chunks, and without a
+    # mark it would be re-parsed on every single run for the rest of time.
+    for path in candidates:
+        mark_document_ingested(pdf_key(path))
+
+    # Rebuilding is only worthwhile when the collection actually changed, but
+    # the index must also exist for search to work at all.
+    if rebuild_index and (result["inserted"] or not os.path.exists(BM25_INDEX_PATH)):
+        rebuild_bm25()
+
+    return result

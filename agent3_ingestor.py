@@ -2,78 +2,49 @@ import os
 import json
 import argparse
 import multiprocessing
-import concurrent.futures
-from tqdm import tqdm
 
 from config import DOWNLOADED_JSON_PATH
 from shared.log import get_logger
-from shared.ingestion import process_pdf, upsert_corpus, rebuild_bm25, get_ingested_documents
+from shared.ingestion import ingest_pdfs
 
 logger = get_logger("agent3")
 
 
-def run_ingestor(workers=1):
+def run_ingestor(workers=1, force=False):
+    """Ingest every PDF Agent 2 successfully downloaded.
+
+    Args:
+        workers: Parallel worker processes for the parsing stage.
+        force:   Re-process PDFs even if they are already recorded as ingested.
+    """
+    if not os.path.exists(DOWNLOADED_JSON_PATH):
+        logger.info(
+            "No download manifest at %s — run Agent 2 (python agent2_fetcher.py) "
+            "first to fetch papers.", DOWNLOADED_JSON_PATH,
+        )
+        return
+
     with open(DOWNLOADED_JSON_PATH, "r") as f:
         downloaded = json.load(f)
 
-    # Skip PDFs that are already fully ingested in ChromaDB
-    already_ingested = get_ingested_documents()
-    to_process = {}
-    skipped = 0
-    for pdf_path, citation_string in downloaded.items():
-        if not os.path.exists(pdf_path):
-            continue
-        pdf_name = os.path.basename(pdf_path).strip().replace(" ", "_").lower()
-        if pdf_name in already_ingested:
-            skipped += 1
-            continue
-        to_process[pdf_path] = citation_string
-
-    if skipped:
-        logger.info(
-            "Skipping %d already-ingested PDFs. %d remaining to process.",
-            skipped, len(to_process),
-        )
-
-    if not to_process:
-        logger.info("All PDFs already ingested. Nothing to do.")
+    if not downloaded:
+        logger.info("Download manifest is empty — nothing to ingest.")
         return
 
-    corpus = []
+    if force:
+        logger.info("--force: re-processing all PDFs regardless of ingestion status.")
 
-    if workers <= 1:
-        logger.info("Running sequentially (1 worker) on %d PDFs…", len(to_process))
-        for pdf_path, citation_string in to_process.items():
-            corpus.extend(process_pdf(pdf_path, citation_string))
-    else:
-        logger.info("Running in parallel with %d workers on %d PDFs…", workers, len(to_process))
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = []
-            for pdf_path, citation_string in to_process.items():
-                futures.append(
-                    executor.submit(process_pdf, pdf_path, citation_string)
-                )
+    result = ingest_pdfs(downloaded, workers=workers, skip_ingested=not force)
 
-            for future in tqdm(
-                concurrent.futures.as_completed(futures),
-                total=len(futures),
-                desc="Processing PDFs",
-            ):
-                try:
-                    corpus.extend(future.result())
-                except Exception as e:
-                    logger.error("Worker failed: %s", e)
-
-    # Chunk, embed, and upsert into ChromaDB
-    inserted = upsert_corpus(corpus)
-    logger.info("Inserted %d new chunks.", inserted)
-
-    # Rebuild BM25 from the full collection
-    rebuild_bm25()
+    logger.info(
+        "Done. Processed %d, skipped %d, inserted %d chunk(s), %d unreadable.",
+        result["processed"], result["skipped"], result["inserted"], len(result["failed"]),
+    )
+    return result
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Ingestor with Parallelization")
+    parser = argparse.ArgumentParser(description="Agent 3 — Ingestor with parallelization")
     parser.add_argument(
         "--workers",
         type=int,
@@ -88,9 +59,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     multiprocessing.set_start_method("spawn", force=True)
-    if args.force:
-        logger.info("--force flag: re-processing all PDFs regardless of ingestion status.")
-        # Temporarily monkey-patch to return empty set
-        import shared.ingestion as _ing
-        _ing.get_ingested_documents = lambda *a, **kw: set()
-    run_ingestor(workers=args.workers)
+    run_ingestor(workers=args.workers, force=args.force)

@@ -24,7 +24,6 @@ import glob
 import time
 import threading
 import argparse
-import concurrent.futures
 
 try:
     from watchdog.observers import Observer
@@ -41,11 +40,9 @@ from config import (
     DRAFT_COOLDOWN_SECONDS,
     MANUAL_COOLDOWN_SECONDS,
     DEFAULT_WORKERS,
-    VECTORDB_PATH,
-    COLLECTION_NAME,
 )
 from shared.log import get_logger
-from shared.ingestion import process_pdf, upsert_corpus, rebuild_bm25, get_ingested_documents, mark_document_ingested
+from shared.ingestion import ingest_pdfs
 
 logger = get_logger("orchestrator")
 
@@ -58,67 +55,21 @@ logger = get_logger("orchestrator")
 def sync_database(workers=1):
     """Ensure every PDF in pulled_pdfs/ is indexed in ChromaDB.
 
-    Called once at startup so the system is always in a consistent state,
-    even if Agent 3 was interrupted or new files were placed while the
-    orchestrator was offline.
+    Called once at startup so the system is always in a consistent state, even
+    if ingestion was interrupted or files were placed while the orchestrator
+    was offline.
     """
     pdf_files = glob.glob(os.path.join(PULLED_PDFS_DIR, "*.pdf"))
     if not pdf_files:
         logger.info("[Sync] No PDFs in pulled_pdfs/ — nothing to sync.")
-        return
+        return None
 
-    # Determine which PDFs are already ingested
-    already_ingested = get_ingested_documents()
-    missing = []
-    for pdf_path in pdf_files:
-        pdf_name = os.path.basename(pdf_path).strip().replace(" ", "_").lower()
-        if pdf_name not in already_ingested:
-            missing.append(pdf_path)
-
-    if not missing:
-        logger.info(
-            "[Sync] All %d PDFs in pulled_pdfs/ are already in the database. ✓",
-            len(pdf_files),
-        )
-        return
-
+    result = ingest_pdfs(pdf_files, workers=workers, log_prefix="[Sync] ")
     logger.info(
-        "[Sync] Found %d/%d PDFs not yet in the database. Ingesting…",
-        len(missing), len(pdf_files),
+        "[Sync] Complete — %d processed, %d already indexed, %d new chunk(s). ✓",
+        result["processed"], result["skipped"], result["inserted"],
     )
-
-    corpus = []
-    if workers <= 1:
-        for i, pdf_path in enumerate(missing):
-            citation_label = os.path.splitext(os.path.basename(pdf_path))[0]
-            logger.info("[Sync] [%d/%d] Processing %s…", i + 1, len(missing), pdf_path)
-            corpus.extend(process_pdf(pdf_path, citation_label))
-    else:
-        logger.info("[Sync] Processing %d PDFs using %d workers…", len(missing), workers)
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = []
-            for pdf_path in missing:
-                citation_label = os.path.splitext(os.path.basename(pdf_path))[0]
-                futures.append(executor.submit(process_pdf, pdf_path, citation_label))
-            
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    corpus.extend(future.result())
-                except Exception as e:
-                    logger.error("[Sync] Worker failed: %s", e)
-
-    if corpus:
-        inserted = upsert_corpus(corpus)
-        logger.info("[Sync] Inserted %d new chunks.", inserted)
-        rebuild_bm25()
-        logger.info("[Sync] Database sync complete. ✓")
-    else:
-        logger.info("[Sync] No content extracted from new PDFs.")
-
-    # Mark all attempted PDFs as ingested so we don't retry duplicates/failures forever
-    for pdf_path in missing:
-        pdf_name = os.path.basename(pdf_path).strip().replace(" ", "_").lower()
-        mark_document_ingested(pdf_name)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -139,10 +90,20 @@ class RawPDFHandler(FileSystemEventHandler):
 
 
 class PulledPDFHandler(FileSystemEventHandler):
-    """Watches pulled_pdfs/ for manually placed or newly fetched PDFs → ingests them."""
+    """Watches pulled_pdfs/ for fetched or manually placed PDFs and ingests them.
 
-    def __init__(self):
-        self._timers = {}
+    Arrivals are collected into a pending set behind a single debounce timer
+    that resets on each new file, then ingested as one batch. Agent 2 writes its
+    downloads straight into this directory, so a fetch run can drop dozens of
+    files at once; batching means the BM25 index is rebuilt once for the run
+    rather than once per paper (a full rebuild re-tokenises the entire
+    collection, so per-file rebuilds get quadratically expensive).
+    """
+
+    def __init__(self, workers=1):
+        self.workers = workers
+        self._pending = set()
+        self._timer = None
         self._lock = threading.Lock()
 
     def on_created(self, event):
@@ -156,34 +117,34 @@ class PulledPDFHandler(FileSystemEventHandler):
         if not path or event.is_directory or not path.lower().endswith(".pdf"):
             return
         with self._lock:
-            if path in self._timers:
-                self._timers[path].cancel()
-            timer = threading.Timer(MANUAL_COOLDOWN_SECONDS, self._ingest, args=[path])
-            self._timers[path] = timer
-            timer.start()
-            logger.info(
-                "[pulled_pdfs/] PDF detected: %s — ingesting in %ds…",
-                os.path.basename(path), MANUAL_COOLDOWN_SECONDS,
-            )
+            self._pending.add(path)
+            pending = len(self._pending)
+            if self._timer:
+                self._timer.cancel()
+            self._timer = threading.Timer(MANUAL_COOLDOWN_SECONDS, self._drain)
+            self._timer.start()
+        logger.info(
+            "[pulled_pdfs/] %d file(s) queued — ingesting in %ds…",
+            pending, MANUAL_COOLDOWN_SECONDS,
+        )
 
-    def _ingest(self, path):
+    def _drain(self):
         with self._lock:
-            self._timers.pop(path, None)
-        pdf_name = os.path.basename(path).strip().replace(" ", "_").lower()
+            batch = sorted(self._pending)
+            self._pending.clear()
+            self._timer = None
+        if not batch:
+            return
         try:
-            citation_label = os.path.splitext(os.path.basename(path))[0]
-            corpus = process_pdf(path, citation_label)
-            if corpus:
-                inserted = upsert_corpus(corpus)
-                rebuild_bm25()
-                logger.info("[pulled_pdfs/] ✓ Ingested %s (%d chunks).", os.path.basename(path), inserted)
-            else:
-                logger.warning("[pulled_pdfs/] No content extracted from %s.", os.path.basename(path))
-            # Always mark as ingested to prevent retry loops on duplicates
-            mark_document_ingested(pdf_name)
+            ingest_pdfs(batch, workers=self.workers, log_prefix="[pulled_pdfs/] ")
         except Exception as e:
-            logger.error("[pulled_pdfs/] Failed to ingest %s: %s", path, e)
-            mark_document_ingested(pdf_name)
+            logger.error("[pulled_pdfs/] Batch ingest failed: %s", e)
+
+    def shutdown(self):
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
 
 
 class DraftHandler(FileSystemEventHandler):
@@ -349,8 +310,9 @@ def main():
     orchestrator = Orchestrator(workers=args.workers)
     observer = Observer()
 
+    pulled_handler = PulledPDFHandler(workers=args.workers)
     observer.schedule(RawPDFHandler(orchestrator), path=RAW_DIR, recursive=False)
-    observer.schedule(PulledPDFHandler(), path=PULLED_PDFS_DIR, recursive=False)
+    observer.schedule(pulled_handler, path=PULLED_PDFS_DIR, recursive=False)
     observer.schedule(DraftHandler(orchestrator), path=DRAFTS_DIR, recursive=False)
 
     observer.start()
@@ -449,6 +411,7 @@ def main():
         print("\nShutting down…")
     finally:
         orchestrator.shutdown()
+        pulled_handler.shutdown()
         observer.stop()
         observer.join()
         logger.info("Orchestrator stopped. Goodbye.")

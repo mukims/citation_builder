@@ -12,8 +12,6 @@ Usage:
 import os
 import pickle
 
-import chromadb
-
 from config import VECTORDB_PATH, COLLECTION_NAME, BM25_INDEX_PATH
 from shared.log import get_logger
 
@@ -28,6 +26,11 @@ def load_search_resources():
     Returns:
         tuple: (collection, bm25, texts, metadatas)
     """
+    # Imported here rather than at module scope: chromadb pulls in a large
+    # dependency tree, and agents that only need this module's pure helpers
+    # (or their tests) should not have to install it.
+    import chromadb
+
     logger.info("Connecting to ChromaDB at %s…", VECTORDB_PATH)
     chroma_client = chromadb.PersistentClient(path=VECTORDB_PATH)
 
