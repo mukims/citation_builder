@@ -10,11 +10,36 @@ from shared.log import get_logger
 
 logger = get_logger("agent1")
 
-# Multiple reference-line patterns to support common citation formats
+# Multiple reference-line patterns to support common citation formats.
+#
+# The bracketed form allows an empty remainder: many journals typeset the
+# marker on its own line, with the citation text following underneath.
+# Requiring content on the same line silently matched none of them.
 CITATION_PATTERNS = [
-    re.compile(r'^\[(\d+)\]\s(.*)'),    # [1] Author...
-    re.compile(r'^(\d+)\.\s{1,3}(.+)'), # 1. Author...
+    re.compile(r'^\[(\d+)\]\s*(.*)$'),   # "[1] Author…" or "[1]" alone
+    re.compile(r'^(\d+)\.\s{1,3}(.+)'),  # 1. Author...
 ]
+
+# The heading that starts a reference list. Everything before it is body text,
+# where the "N. …" pattern above would otherwise match numbered section
+# headings ("1. Introduction", "2. Experimental methods") and file them as
+# citations.
+_REFERENCES_HEADING = re.compile(
+    r'^\s*(?:\d+\.?\s*)?(references|bibliography|works\s+cited|literature\s+cited)\s*:?\s*$',
+    re.IGNORECASE,
+)
+
+
+def _reference_section(lines):
+    """Return the slice of *lines* holding the reference list.
+
+    Falls back to the whole document when no heading is found, which keeps
+    papers that never had one working as before.
+    """
+    for i in range(len(lines) - 1, -1, -1):
+        if _REFERENCES_HEADING.match(lines[i]):
+            return lines[i + 1:]
+    return lines
 
 
 def _match_citation_line(line):
@@ -34,8 +59,8 @@ def extract_citations(pdf_path):
         logger.error("pdftotext failed: %s", result.stderr)
         return []
 
-    lines = result.stdout.split('\n')
-    
+    lines = _reference_section(result.stdout.split('\n'))
+
     citations = []
     current_citation = ""
     

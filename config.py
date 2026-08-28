@@ -11,7 +11,9 @@ import os
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ─── Ollama Models ────────────────────────────────────────────────────────────
-LLM_MODEL       = "gemma4:latest"
+# gemma4:latest is not a published tag — the registry 404s on it, so it could
+# never be pulled. gemma4:e2b is the variant actually installed locally.
+LLM_MODEL       = os.environ.get("CITATION_LLM_MODEL", "gemma4:e2b")
 CHAT_MODEL      = "qwen2.5:7b"          # Lighter model for interactive research chat
 EMBED_MODEL     = "nomic-embed-text"
 EVAL_MODEL      = "deepseek-r1:14b"

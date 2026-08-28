@@ -62,6 +62,25 @@ def _arxiv_id_from_entry(entry, ns) -> str | None:
     return node.text.rstrip("/").split("/")[-1]
 
 
+# HTTP statuses worth trying again later: a rate limit or a server-side blip
+# says nothing about whether the paper is available.
+_TRANSIENT_STATUS = {408, 425, 429, 500, 502, 503, 504}
+
+
+def is_transient(exc: Exception) -> bool:
+    """Whether *exc* is a temporary condition rather than a verdict on the paper.
+
+    Failures recorded in failed_downloads.json are permanent: the next run skips
+    every citation listed there. Recording a rate limit or a gateway timeout
+    that way drops the paper from the corpus for good, for a reason that has
+    nothing to do with whether it can be fetched.
+    """
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    response = getattr(exc, "response", None)
+    return response is not None and response.status_code in _TRANSIENT_STATUS
+
+
 def _checkpoint(downloaded, failed):
     """Write state to disk after every paper — crash-safe incremental saves."""
     with open(DOWNLOADED_JSON_PATH, "w") as f:
@@ -112,6 +131,16 @@ def fetch_papers():
             len(remaining),
         )
 
+    # Crossref serves identified clients from its "polite pool", which has far
+    # more headroom than the anonymous one. Same address Unpaywall requires.
+    contact = UNPAYWALL_EMAIL if UNPAYWALL_EMAIL != "your-email@example.com" else None
+    if not contact:
+        logger.warning(
+            "No contact address set, so Crossref requests go to the anonymous "
+            "pool and will be rate-limited (HTTP 429) far sooner."
+        )
+
+    transient = 0
     for i, citation in enumerate(remaining):
         logger.info("[%d/%d] Processing: %s…", i + 1, len(remaining), citation[:60])
         pdf_saved = False
@@ -121,6 +150,8 @@ def fetch_papers():
             # 1. Query Crossref to find DOI
             crossref_url = "https://api.crossref.org/works"
             params = {"query.bibliographic": citation, "rows": 1, "select": "DOI,title"}
+            if contact:
+                params["mailto"] = contact
             res = requests.get(crossref_url, params=params, timeout=10)
             res.raise_for_status()
             data = res.json()
@@ -242,8 +273,16 @@ def fetch_papers():
                 failed.append({"citation": citation, "reason": fail_reason or "Fetch failed"})
 
         except Exception as e:
-            failed.append({"citation": citation, "reason": str(e)})
-            logger.error(" --> ERROR: %s", e)
+            if is_transient(e):
+                # Left out of `failed` on purpose, so the next run retries it.
+                logger.warning(
+                    " --> Temporary failure (%s) — not recorded, will retry next run.",
+                    type(e).__name__,
+                )
+                transient += 1
+            else:
+                failed.append({"citation": citation, "reason": str(e)})
+                logger.error(" --> ERROR: %s", e)
             
         # ── FIX #7: Checkpoint after every paper ─────────────────────────
         _checkpoint(downloaded, failed)
@@ -253,7 +292,11 @@ def fetch_papers():
         else:
             time.sleep(ARXIV_RATE_LIMIT)
 
-    logger.info("Done! Downloaded %d, Failed %d", len(downloaded), len(failed))
+    logger.info(
+        "Done! Downloaded %d, failed %d%s",
+        len(downloaded), len(failed),
+        f", {transient} temporary failures left for the next run" if transient else "",
+    )
 
 if __name__ == "__main__":
     fetch_papers()

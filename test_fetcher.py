@@ -9,7 +9,9 @@ byte-identical duplicates of another file.
 
 import unittest
 
-from agent2_fetcher import paper_filename
+import requests
+
+from agent2_fetcher import is_transient, paper_filename
 
 
 class TestPaperFilename(unittest.TestCase):
@@ -74,6 +76,45 @@ class TestPaperFilename(unittest.TestCase):
     def test_name_stays_within_a_sane_length(self):
         name = paper_filename("x" * 400, doi="y" * 400)
         self.assertLessEqual(len(name), 100)
+
+
+class TestTransientClassification(unittest.TestCase):
+    """Anything recorded in failed_downloads.json is skipped by every later run.
+
+    So the question is not "did this attempt fail" but "does this failure tell
+    us the paper is unavailable". A rate limit does not.
+    """
+
+    @staticmethod
+    def _http_error(status):
+        response = requests.Response()
+        response.status_code = status
+        return requests.HTTPError(f"{status} Client Error", response=response)
+
+    def test_rate_limit_is_transient(self):
+        """The case seen in practice: Crossref 429s on the anonymous pool."""
+        self.assertTrue(is_transient(self._http_error(429)))
+
+    def test_server_errors_are_transient(self):
+        for status in (500, 502, 503, 504):
+            with self.subTest(status=status):
+                self.assertTrue(is_transient(self._http_error(status)))
+
+    def test_timeouts_and_connection_drops_are_transient(self):
+        self.assertTrue(is_transient(requests.Timeout("timed out")))
+        self.assertTrue(is_transient(requests.ConnectionError("reset")))
+
+    def test_not_found_is_permanent(self):
+        """404 is a real answer about the paper — record it and move on."""
+        self.assertFalse(is_transient(self._http_error(404)))
+
+    def test_forbidden_is_permanent(self):
+        """403 means the publisher refuses us, which retrying will not change."""
+        self.assertFalse(is_transient(self._http_error(403)))
+
+    def test_error_without_a_response_is_permanent(self):
+        """A parse error or similar carries no HTTP status to judge by."""
+        self.assertFalse(is_transient(ValueError("malformed record")))
 
 
 if __name__ == "__main__":

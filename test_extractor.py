@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import agent1_extractor as ex
+from agent1_extractor import _match_citation_line, _reference_section
 
 
 class TestUniqueDestination(unittest.TestCase):
@@ -129,6 +130,73 @@ class TestRunExtractorFiling(unittest.TestCase):
 
         processed = sorted(os.listdir(os.path.join(self.raw, "processed")))
         self.assertEqual(processed, ["good.pdf", "good_2.pdf"])
+
+
+class TestCitationLinePatterns(unittest.TestCase):
+    def test_bracket_marker_with_text_on_the_same_line(self):
+        self.assertEqual(
+            _match_citation_line("[3] C. Liu, Graphene-based supercapacitor, Nano Lett. 10 (2010)"),
+            (3, "C. Liu, Graphene-based supercapacitor, Nano Lett. 10 (2010)"),
+        )
+
+    def test_bracket_marker_alone_on_its_line(self):
+        """Many journals put the marker on its own line, text underneath.
+
+        The pattern used to require whitespace plus content after the bracket,
+        so a reference list typeset this way matched nothing at all — while the
+        numbered-heading pattern happily captured "1. Introduction" instead.
+        """
+        self.assertEqual(_match_citation_line("[1]"), (1, ""))
+
+    def test_numbered_marker_still_matches(self):
+        self.assertEqual(
+            _match_citation_line("12. A. Author, Some Paper, J. Phys. (2020)"),
+            (12, "A. Author, Some Paper, J. Phys. (2020)"),
+        )
+
+    def test_ordinary_prose_does_not_match(self):
+        self.assertIsNone(_match_citation_line("The results in Figure 3 show that"))
+
+
+class TestReferenceSectionScoping(unittest.TestCase):
+    """The "N." pattern matches numbered section headings just as readily as
+    citations, so it must only be applied after the reference list begins."""
+
+    BODY = [
+        "1. Introduction",
+        "Storing electrical charge has been known since ancient times.",
+        "2. Experimental methods",
+        "MnFe2O4 nano-ferrites were prepared by hydrothermal method.",
+        "References",
+        "[1]",
+        "B.E. Conway, Electrochemical Supercapacitors, Springer US, 2013.",
+    ]
+
+    def test_returns_only_lines_after_the_heading(self):
+        self.assertEqual(_reference_section(self.BODY), self.BODY[5:])
+
+    def test_section_headings_are_excluded(self):
+        kept = _reference_section(self.BODY)
+        self.assertNotIn("1. Introduction", kept)
+        self.assertNotIn("2. Experimental methods", kept)
+
+    def test_heading_match_is_case_insensitive(self):
+        for heading in ("REFERENCES", "references", "Bibliography", "Works Cited"):
+            with self.subTest(heading=heading):
+                self.assertEqual(_reference_section(["body", heading, "[1] X"]), ["[1] X"])
+
+    def test_numbered_heading_form_is_recognised(self):
+        self.assertEqual(_reference_section(["body", "5. References", "[1] X"]), ["[1] X"])
+
+    def test_falls_back_to_the_whole_document_when_absent(self):
+        """Papers without an explicit heading keep working as before."""
+        lines = ["[1] A. Author", "[2] B. Author"]
+        self.assertEqual(_reference_section(lines), lines)
+
+    def test_the_last_heading_wins(self):
+        """'References' can appear in a table of contents before the real list."""
+        lines = ["References", "(contents entry)", "References", "[1] Real"]
+        self.assertEqual(_reference_section(lines), ["[1] Real"])
 
 
 if __name__ == "__main__":
