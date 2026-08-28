@@ -29,7 +29,9 @@ bm25_index.pkl
 
 # Downloaded PDFs (sourced automatically or placed manually)
 pulled_pdfs/*.pdf
-archive_pulled_pdfs/*.pdf
+# Unanchored so it still applies after the directory was moved under attic/.
+archive_pulled_pdfs/**/*.pdf
+**/archive_pulled_pdfs/*.pdf
 # Raw source PDFs (user-provided)
 raw/**/*.pdf
 
@@ -67,10 +69,17 @@ grobid_output/
 archive_*.json
 *_full_backup.json
 
+# ── Attic — quarantined, not part of the running pipeline ─────────────────────
+# attic/ holds things kept for reference but wired into nothing. Two files there
+# are tracked on purpose (agent_graph.py and publaynet_config.yaml, whose
+# history is worth keeping); everything else under it is local-only.
+attic/citation_builder_agent/
+
 # ── Local agent scaffolding / vendored deps ───────────────────────────────────
-# Google ADK session state (citation_builder_agent/)
+# Google ADK session state
 .adk/
-# Vendored detectron2 checkout — install as a dependency instead of committing
+# Vendored detectron2 checkout — detectron2 is installed as a real dependency,
+# so the checkout is reference material only.
 detectron2/
 
 # ── Evaluation output ─────────────────────────────────────────────────────────

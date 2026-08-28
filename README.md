@@ -6,7 +6,7 @@ This system extracts reference strings from a base PDF, automatically downloads 
 
 ## System Architecture
 
-The pipeline consists of seven agents, a shared utility layer, and an intelligent orchestrator backed by a LangGraph supervisor.
+The pipeline consists of seven agents, a shared utility layer, and an orchestrator that watches the working directories and runs the appropriate stages.
 
 ### Core Infrastructure
 
@@ -19,8 +19,12 @@ The pipeline consists of seven agents, a shared utility layer, and an intelligen
   - `shared/log.py` — Centralised `logging` configuration (console + rotating file)
 
 ### Orchestration & Control Flow
-- **Master Orchestrator (`master_orchestrator.py`)**: Continuously monitors the `raw/`, `drafts/`, and `pulled_pdfs/` directories. It implements debouncing and cooldown timers to prevent GPU memory crashes during rapid file drops, and delegates events to the LangGraph supervisor.
-- **LangGraph Supervisor (`agent_graph.py`)**: A ReAct-style agent utilizing LangGraph and `gemma4:latest` with tool-calling capabilities. When an event is triggered by the orchestrator (e.g., "A new PDF was dropped"), this agent autonomously reasons about the state of the pipeline and iteratively calls the necessary underlying agent tools to process the data.
+- **Master Orchestrator (`master_orchestrator.py`)**: The single entrypoint. Continuously monitors the `raw/`, `drafts/`, and `pulled_pdfs/` directories, with debouncing and cooldown timers to prevent GPU memory crashes during rapid file drops, and runs the pipeline stages directly:
+  - `raw/` → Agent 1 (extract) → Agent 2 (fetch) → Agent 3 (ingest)
+  - `pulled_pdfs/` → batched ingest via `shared/ingestion.py`
+  - `drafts/` → Agent 5 (batch cite)
+
+  These sequences are fixed, so they are called directly rather than planned by an LLM. An earlier LangGraph supervisor (`agent_graph.py`) chose the stages at runtime; it now lives in `attic/` and nothing imports it.
 
 ### Data Ingestion (Agents 1-3)
 1. **Agent 1: Extractor (`agent1_extractor.py`)**: 

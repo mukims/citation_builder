@@ -20,7 +20,7 @@ No. The entire pipeline runs **locally** using [Ollama](https://ollama.com/) for
 
 | Model | Provider | Purpose |
 |-------|----------|---------|
-| `gemma4:latest` | Ollama | Vision-language figure description, citation judgement, response generation, and LangGraph supervisor reasoning |
+| `gemma4:latest` | Ollama | Vision-language figure description, citation judgement, and response generation |
 | `nomic-embed-text` | Ollama | Dense text embeddings for ChromaDB and hybrid search |
 | `deepseek-r1:14b` | Ollama | Judge LLM used **only** by the Ragas evaluation script |
 
@@ -41,9 +41,11 @@ All model names are configured in `config.py` and can be changed in one place.
 | 5 — Batch Citer | `agent5_batch_citer.py` | Automated full-draft citation processor that outputs `\cite{key}` tagged text |
 | 6 — Manual Ingestor | `agent6_manual_ingestor.py` | Watches `pulled_pdfs/` for manually dropped PDFs and ingests them directly |
 
-### What is the LangGraph Supervisor?
+### What happened to the LangGraph supervisor?
 
-The supervisor (`agent_graph.py`) is a **ReAct-style agent** built with [LangGraph](https://langchain-ai.github.io/langgraph/) that wraps all agents as callable tools. Instead of running agents via subprocess, the orchestrator sends a natural-language event description (e.g., *"New PDFs were dropped in raw/"*) to the supervisor, which uses `gemma4:latest` with tool-calling to autonomously decide **which** agents to invoke and in **what order**.
+`agent_graph.py` was a ReAct-style agent that wrapped every agent as a callable tool. The orchestrator sent it a natural-language event description (*"New PDFs were dropped in raw/"*) and it decided which agents to invoke and in what order.
+
+It has been retired to `attic/`. The two sequences it planned never varied — `raw/` is always extract → fetch → ingest, and `drafts/` is always a single batch-cite call — so the orchestrator now calls them directly. Handing an invariant sequence to a planner cost correctness rather than buying flexibility: the planner could drop or reorder a stage, and its tool wrappers returned a success string regardless of what actually happened underneath.
 
 ### What is the Master Orchestrator?
 
@@ -51,9 +53,9 @@ The supervisor (`agent_graph.py`) is a **ReAct-style agent** built with [LangGra
 
 | Directory | Trigger | Action |
 |-----------|---------|--------|
-| `raw/` | New PDF dropped | Debounce 30 s → delegate to LangGraph supervisor (Agents 1→2→3) |
-| `drafts/` | New/modified `.txt` file | Debounce 2 s → delegate to LangGraph supervisor (Agent 5) |
-| `pulled_pdfs/` | New PDF dropped | Debounce 5 s → Agent 6 ingests directly into ChromaDB |
+| `raw/` | New PDF dropped | Debounce 30 s → Agent 1 → Agent 2 → Agent 3 |
+| `drafts/` | New/modified `.txt` file | Debounce 2 s → Agent 5 (batch cite) |
+| `pulled_pdfs/` | New PDF dropped | Debounce 5 s → batched ingest via `shared/ingestion.py` |
 
 ### What is "hybrid search"?
 
@@ -119,7 +121,7 @@ ollama pull nomic-embed-text
 
 ### Where do I get the Detectron2 weights?
 
-Agent 3 expects the PubLayNet `mask_rcnn_X_101_32x8d_FPN_3x` checkpoint at `../model_final.pth` (one directory above `citation_builder/`). It is downloaded automatically by `layoutparser` on first use, or you can pre-download and place it manually.
+Agent 3 expects the PubLayNet `mask_rcnn_X_101_32x8d_FPN_3x` checkpoint at `model_final.pth` in the project root — that is what `config.DETECTRON_WEIGHTS` resolves to. It is downloaded automatically by `layoutparser` on first use, or you can pre-download and place it manually.
 
 ### Do I need a GPU?
 
@@ -258,12 +260,12 @@ Yes. Change the model name in `config.py`:
 
 ```python
 # config.py
-LLM_MODEL = "your-model:latest"     # Used by all agents and the supervisor
+LLM_MODEL = "your-model:latest"     # Used by all agents
 EMBED_MODEL = "your-embed-model"    # Used for dense vector search
 EVAL_MODEL = "your-eval-model"      # Used by Ragas evaluation only
 ```
 
-All agents import from `config.py`, so this single change propagates everywhere. For the supervisor, the model must support tool-calling. For figure description, a multimodal (vision-language) model is required.
+All agents import from `config.py`, so this single change propagates everywhere. For figure description, a multimodal (vision-language) model is required.
 
 ### How long does the full pipeline take?
 
@@ -351,11 +353,6 @@ The LLM is being conservative. You can:
 1. Make the prompt in `agent5_batch_citer.py`'s `needs_citation()` function more permissive.
 2. Use Agent 4 interactively to cite specific sentences instead.
 
-### The LangGraph supervisor loops or picks wrong tools
-
-- Update to the latest `gemma4` weights: `ollama pull gemma4:latest`
-- Bypass the supervisor entirely and run agents manually (see [Can I run agents individually?](#can-i-run-agents-individually-without-the-orchestrator)).
-
 ### Where are the logs?
 
 All agents write to `logs/citation_agent.log` (rotating, 5 MB max, 3 backups). Console output is also logged. Check this file for detailed error traces:
@@ -394,28 +391,13 @@ UNPAYWALL_EMAIL = "your.email@example.com"
 
 Using your own institutional email may improve rate limits from the Unpaywall API.
 
-### Can I run the supervisor without the file watchers?
-
-Yes. Import and call `process_event()` directly:
-
-```python
-from agent_graph import process_event
-process_event("Please extract citations and fetch the papers.")
-```
-
-Or run it as a standalone script:
-
-```bash
-python agent_graph.py
-```
-
 ### How do I contribute or extend the pipeline?
 
 To add a new agent:
 1. Create `agentN_your_agent.py` with a callable entry-point function.
 2. Import shared utilities as needed (`from shared.search import hybrid_search`, `from config import LLM_MODEL`, etc.).
-3. Define a `@tool`-decorated wrapper in `agent_graph.py` and add it to the `tools` list.
-4. The LangGraph supervisor will automatically have access to your new tool.
+3. Call it from `master_orchestrator.py` at the point in the sequence where it belongs, or give it a `__main__` block so it can be run on its own.
+4. If it ingests PDFs, go through `shared.ingestion.ingest_pdfs()` rather than calling `process_pdf`/`upsert_corpus` yourself — that is what keeps the already-ingested bookkeeping consistent.
 
 ---
 
