@@ -210,21 +210,45 @@ class Orchestrator:
             self.pdf_run_pending = False
 
         try:
-            # Lazy import to avoid loading LangGraph at startup
-            from agent_graph import process_event
-            logger.info("Notifying Supervisor Agent of new PDFs…")
-            process_event(
-                f"New PDFs have been added to the raw/ directory. "
-                f"Please extract citations from them, fetch the papers, and ingest them using {self.workers} workers."
-            )
+            self._run_raw_stages()
         except Exception as e:
-            logger.error("Pipeline error: %s", e)
+            logger.error("[raw/] Pipeline error: %s", e)
         finally:
             with self.pdf_lock:
                 self.is_processing_pdf = False
                 if self.pdf_run_pending:
                     logger.info("[raw/] Resolving pending queued PDFs…")
                     self._schedule_pdf_run()
+
+    def _run_raw_stages(self):
+        """Run the raw/ pipeline: extract citations → fetch papers → ingest.
+
+        The order is fixed and the steps never vary, so they are written out
+        here rather than described in prose to an LLM planner. A planner can
+        silently skip or reorder a stage, and — because its tool wrappers
+        returned a success string regardless of what the underlying agent did —
+        report that it had all worked either way.
+        """
+        # Imported lazily so a missing optional dependency in one stage does not
+        # prevent the orchestrator from starting.
+        from agent1_extractor import run_extractor
+        from agent2_fetcher import fetch_papers
+        from agent3_ingestor import run_ingestor
+
+        logger.info("[raw/] 1/3 Extracting citations from new source PDFs…")
+        run_extractor()
+
+        logger.info("[raw/] 2/3 Fetching open-access copies of the references…")
+        try:
+            fetch_papers()
+        except Exception as e:
+            # Agent 2 checkpoints after every paper, so a network failure part
+            # way through still leaves useful downloads to ingest.
+            logger.error("[raw/] Fetch stage failed: %s — ingesting what was downloaded.", e)
+
+        logger.info("[raw/] 3/3 Ingesting fetched papers…")
+        run_ingestor(workers=self.workers)
+        logger.info("[raw/] Pipeline complete.")
 
     # ── Draft citation (Agent 5) ─────────────────────────────────────────
 
@@ -237,15 +261,23 @@ class Orchestrator:
             timer.start()
 
     def _run_citer(self, filepath):
+        from agent5_batch_citer import run_batch_citer
+
+        out_path = filepath.replace(".txt", "_cited.txt")
+        name = os.path.basename(filepath)
         try:
-            from agent_graph import process_event
-            logger.info("Notifying Supervisor Agent of new draft: %s…", filepath)
-            process_event(
-                f"A new draft text file needs citation processing. "
-                f"The file is located at: {filepath}. Please use the batch cite tool."
-            )
+            logger.info("[drafts/] Citing %s…", name)
+            written = run_batch_citer(filepath, out_path)
+            if written:
+                logger.info("[drafts/] ✓ %s → %s", name, os.path.basename(written))
+            else:
+                # Agent 5 aborts rather than emit a misleading draft; say so
+                # instead of reporting a success it did not achieve.
+                logger.warning(
+                    "[drafts/] %s produced no output — see the errors above.", name
+                )
         except Exception as e:
-            logger.error("Draft citing error: %s", e)
+            logger.error("[drafts/] Draft citing error for %s: %s", name, e)
 
     # ── Cleanup ──────────────────────────────────────────────────────────
 
@@ -349,58 +381,17 @@ def main():
                 args.chat = False  # fall through to watch mode below
 
         if args.chat:
-            print("=" * 60)
-            print("  Type your research questions below.")
-            print("  File watchers are running in the background.")
-            print("  Type /help for commands, 'quit' to exit.")
-            print("=" * 60 + "\n")
+            # The chat loop itself lives in Agent 7, so the command set cannot
+            # drift between `python agent7_research_chat.py` and `--chat`.
+            from agent7_research_chat import run_repl
 
-            from agent7_research_chat import HELP_TEXT
-            while True:
-                try:
-                    user_input = input("You: ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print("\nShutting down…")
-                    break
-
-                if not user_input:
-                    continue
-                if user_input.lower() in ("quit", "exit"):
-                    break
-                if user_input == "/help":
-                    print(HELP_TEXT)
-                    continue
-                if user_input == "/clear":
-                    agent.clear_history()
-                    print("✓ Conversation history cleared.\n")
-                    continue
-                if user_input == "/sources":
-                    if not agent.last_sources:
-                        print("No sources from the last response.\n")
-                    else:
-                        print("\n📚 Sources used in the last response:")
-                        for i, s in enumerate(agent.last_sources, 1):
-                            print(f"  {i}. [{s['document']}] {s['citation']}")
-                            print(f"     Relevance: {s['relevance_score']}")
-                        print()
-                    continue
-                if user_input == "/export":
-                    path = agent.export_conversation()
-                    print(f"✓ Conversation exported to {path}\n")
-                    continue
-
-                try:
-                    print("\nAssistant: ", end="", flush=True)
-                    for chunk in agent.chat_stream(user_input):
-                        print(chunk, end="", flush=True)
-                    print("\n")
-                    if agent.last_sources:
-                        cits = {s["citation"][:60] for s in agent.last_sources[:3]}
-                        print(f"  📚 Drawing from: {', '.join(cits)}")
-                        print("  (type /sources for full list)\n")
-                except Exception as e:
-                    logger.error("Chat error: %s", e)
-                    print(f"\n⚠ Error: {e}. Please try again.\n")
+            run_repl(agent, banner=(
+                "=" * 60 + "\n"
+                "  Type your research questions below.\n"
+                "  File watchers are running in the background.\n"
+                "  Type /help for commands, 'quit' to exit.\n"
+                + "=" * 60 + "\n"
+            ))
         else:
             # Headless watch mode — just idle until Ctrl+C
             logger.info("Running in watch mode. Press Ctrl+C to stop.")

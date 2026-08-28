@@ -213,21 +213,19 @@ class ResearchChat:
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Agent 7 — Interactive Research Assistant")
-    parser.add_argument(
-        "--top_k", type=int, default=5,
-        help="Number of context chunks to retrieve per question (default: 5).",
-    )
-    args = parser.parse_args()
+def run_repl(agent, banner: str | None = None):
+    """Run the interactive chat loop against *agent* until the user exits.
 
-    agent = ResearchChat(top_k=args.top_k)
+    Shared by this module's own CLI and the orchestrator's --chat mode. Both
+    previously carried their own copy of the loop, so a command added to one
+    was simply missing from the other.
 
-    print("\n" + "=" * 60)
-    print("  🔬  Research Assistant — Interactive Mode")
-    print("  Powered by your ingested paper database")
-    print("  Type /help for commands, 'quit' to exit")
-    print("=" * 60 + "\n")
+    Args:
+        agent:  A ready :class:`ResearchChat` instance.
+        banner: Optional text printed before the first prompt.
+    """
+    if banner:
+        print(banner)
 
     while True:
         try:
@@ -239,7 +237,6 @@ def main():
         if not user_input:
             continue
 
-        # Handle commands
         if user_input.lower() in ("quit", "exit"):
             print("Goodbye!")
             break
@@ -269,7 +266,6 @@ def main():
             print(f"✓ Conversation exported to {path}\n")
             continue
 
-        # Normal chat turn
         try:
             print("\nAssistant: ", end="", flush=True)
             for chunk in agent.chat_stream(user_input):
@@ -278,10 +274,29 @@ def main():
             if agent.last_sources:
                 cits = {s["citation"][:60] for s in agent.last_sources[:3]}
                 print(f"  📚 Drawing from: {', '.join(cits)}")
-                print(f"  (type /sources for full list)\n")
+                print("  (type /sources for full list)\n")
         except Exception as e:
             logger.error("Error during chat: %s", e)
             print(f"\n⚠ Error: {e}. Please try again.\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Agent 7 — Interactive Research Assistant")
+    parser.add_argument(
+        "--top_k", type=int, default=5,
+        help="Number of context chunks to retrieve per question (default: 5).",
+    )
+    args = parser.parse_args()
+
+    agent = ResearchChat(top_k=args.top_k)
+
+    run_repl(agent, banner=(
+        "\n" + "=" * 60 + "\n"
+        "  🔬  Research Assistant — Interactive Mode\n"
+        "  Powered by your ingested paper database\n"
+        "  Type /help for commands, 'quit' to exit\n"
+        + "=" * 60 + "\n"
+    ))
 
 
 if __name__ == "__main__":

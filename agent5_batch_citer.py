@@ -280,9 +280,19 @@ def _generate_report(
 
 
 def run_batch_citer(file_path, out_path="cited_draft.txt"):
+    """Cite every claim in *file_path* that the retrieved corpus supports.
+
+    Writes three files alongside *out_path*: the cited draft, a
+    ``_citations.json`` key mapping for BibTeX, and a ``_report.md`` explaining
+    each decision.
+
+    Returns:
+        str | None: *out_path* if the draft was written, None if the run was
+        aborted before producing output.
+    """
     if not os.path.exists(file_path):
         logger.error("File %s not found.", file_path)
-        return
+        return None
 
     with open(file_path, "r") as f:
         draft_text = f.read()
@@ -310,7 +320,7 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
                 "  → Aborting without writing output. Re-run to try again, or "
                 "shorten the draft if the model keeps truncating its reply.", e,
             )
-            return
+            return None
         for idx, needs in zip(eligible_indices, batch_results):
             needs_cite[idx] = needs
 
@@ -422,6 +432,10 @@ def run_batch_citer(file_path, out_path="cited_draft.txt"):
         file_path, report_path, sentences, cited_sentences,
         needs_cite, citation_entries, citation_mapping, key_registry,
     )
+
+    # Returned so callers can tell a completed run from an aborted one. The
+    # early returns above yield None; only this path wrote an output file.
+    return out_path
 
 
 if __name__ == "__main__":
