@@ -44,17 +44,28 @@ images/
 !raw/.gitkeep
 !drafts/.gitkeep
 
-# ── JSON data files (large / machine-generated) ───────────────────────────────
-# Uncomment below if you do NOT want to track these in git:
-# downloaded.json
-# failed_downloads.json
-# extracted_citations.json
+# ── Generated pipeline state (rebuilt by the agents; never commit) ────────────
+# These are written at runtime and are regenerated from raw/ on the next run.
+# extracted_citations.json also carries author emails lifted from front pages.
+downloaded.json
+failed_downloads.json
+extracted_citations.json
 
 # ── Scraped author metadata (contains personal data) ──────────────────────────
-# metadata_auth.* holds author email addresses harvested from paper front pages.
-# Regenerate locally with text_extraction.ipynb; do not commit.
+# All of the below hold author email addresses harvested from paper front pages.
+# Regenerate locally; do not commit.
 metadata_auth.json
 metadata_auth.jsonl
+extracted_metadata.jsonl
+
+# GROBID TEI output — machine-generated, and its <email> elements carry the
+# same harvested author addresses. Regenerate by re-running GROBID.
+grobid_output/
+
+# ── One-off archive/backup snapshots ──────────────────────────────────────────
+# Superseded by the live files above; nothing in the codebase reads them.
+archive_*.json
+*_full_backup.json
 
 # ── Local agent scaffolding / vendored deps ───────────────────────────────────
 # Google ADK session state (citation_builder_agent/)
