@@ -1,6 +1,0 @@
-# Extra dependencies for evaluate_rag.py only. The pipeline runs without these.
-#
-#   python -m pip install -r requirements.txt -r requirements-eval.txt
-ragas~=0.2
-datasets~=5.0.1
-pandas~=2.3.3

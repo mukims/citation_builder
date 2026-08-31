@@ -1,178 +1,305 @@
-import subprocess
+import os
 import re
 import json
-import os
 import glob
-import shutil
+from difflib import SequenceMatcher
+
+from grobid_client.grobid_client import GrobidClient
+from bs4 import BeautifulSoup
 
 from config import RAW_DIR, EXTRACTED_CITATIONS_PATH
 from shared.log import get_logger
 
 logger = get_logger("agent1")
 
-# Multiple reference-line patterns to support common citation formats.
-#
-# The bracketed form allows an empty remainder: many journals typeset the
-# marker on its own line, with the citation text following underneath.
-# Requiring content on the same line silently matched none of them.
-CITATION_PATTERNS = [
-    re.compile(r'^\[(\d+)\]\s*(.*)$'),   # "[1] Author…" or "[1]" alone
-    re.compile(r'^(\d+)\.\s{1,3}(.+)'),  # 1. Author...
-]
+# GROBID's TEI output. Kept alongside the PDFs so a run can be inspected
+# and re-parsed without hitting the server again.
+XML_OUTPUT_DIR = os.path.join(RAW_DIR, "grobid_output")
 
-# The heading that starts a reference list. Everything before it is body text,
-# where the "N. …" pattern above would otherwise match numbered section
-# headings ("1. Introduction", "2. Experimental methods") and file them as
-# citations.
-_REFERENCES_HEADING = re.compile(
-    r'^\s*(?:\d+\.?\s*)?(references|bibliography|works\s+cited|literature\s+cited)\s*:?\s*$',
-    re.IGNORECASE,
+TEI_SUFFIXES = (
+    ".references.tei.xml",
+    ".fulltext.tei.xml",
+    ".grobid.tei.xml",
+    ".tei.xml",
+)
+
+# Reference types that rarely have a real DOI. A consolidated DOI on one of
+# these is a likely false match rather than a find.
+GREY_MARKERS = (
+    "available online",
+    "accessed on",
+    "http://",
+    "https://",
+    "www.",
+    "technical report",
+    "white paper",
+    "thesis",
+    "dissertation",
+    "standard",
+    "patent",
+    "datasheet",
 )
 
 
-def _reference_section(lines):
-    """Return the slice of *lines* holding the reference list.
+def run_grobid_batch(pdf_dir: str, output_dir: str):
+    """Send every PDF in pdf_dir to the local GROBID server."""
+    logger.info("Sending PDFs in %s to GROBID…", pdf_dir)
+    client = GrobidClient()
 
-    Falls back to the whole document when no heading is found, which keeps
-    papers that never had one working as before.
+    # processFulltextDocument returns header, body and bibliography, and tags
+    # in-text citation markers with the reference they point to.
+    client.process(
+        service="processFulltextDocument",
+        input_path=pdf_dir,
+        output=output_dir,
+        n=10,
+        consolidate_citations=1,
+        consolidate_header=True,
+        include_raw_citations=True,
+        force=True,
+    )
+    logger.info("GROBID batch complete.")
+
+
+def _clean(node):
+    """Collapse GROBID's line wrapping into single-spaced text."""
+    if node is None:
+        return None
+    text = " ".join(node.text.split())
+    return text or None
+
+
+def _stem(path):
+    name = os.path.basename(path)
+    for suffix in TEI_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return os.path.splitext(name)[0]
+
+
+def _person_name(pers):
+    parts = [_clean(f) for f in pers.find_all("forename")]
+    parts.append(_clean(pers.find("surname")))
+    name = " ".join(p for p in parts if p)
+    return name or None
+
+
+def _normalise(text):
+    """Lowercase alphanumeric tokens, for loose title comparison."""
+    return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def _doi_confidence(title, raw_reference):
     """
-    for i in range(len(lines) - 1, -1, -1):
-        if _REFERENCES_HEADING.match(lines[i]):
-            return lines[i + 1:]
-    return lines
+    Rate how well a consolidated title matches the reference as printed.
+
+    GROBID's consolidation can match grey literature to an unrelated DOI and
+    overwrite the title with the matched record. Comparing the returned title
+    against the raw string catches most of those.
+
+    Returns one of: "high", "medium", "low", "unknown".
+    """
+    if not raw_reference:
+        return "unknown"
+
+    raw_lower = raw_reference.lower()
+    is_grey = any(marker in raw_lower for marker in GREY_MARKERS)
+
+    if not title:
+        return "low" if is_grey else "unknown"
+
+    title_tokens = _normalise(title)
+    raw_tokens = _normalise(raw_reference)
+    if not title_tokens:
+        return "unknown"
+
+    overlap = len(title_tokens & raw_tokens) / len(title_tokens)
+    ratio = SequenceMatcher(None, title.lower(), raw_lower).ratio()
+
+    if overlap >= 0.8:
+        return "medium" if is_grey else "high"
+    if overlap >= 0.5 or ratio >= 0.4:
+        return "medium"
+    return "low"
 
 
-def _match_citation_line(line):
-    """Try each citation pattern and return (id, rest_of_line) or None."""
-    for pattern in CITATION_PATTERNS:
-        m = pattern.match(line)
-        if m:
-            return int(m.group(1)), m.group(2)
-    return None
+def parse_reference(bibl, source_file=None):
+    """Parse a single <biblStruct> from a TEI reference list."""
+    analytic = bibl.find("analytic")
+    monogr = bibl.find("monogr")
 
+    # Article title lives in <analytic>; for books and reports the title is
+    # in <monogr> instead, so fall back rather than returning None.
+    title = None
+    if analytic:
+        title = _clean(analytic.find("title", type="main")) or _clean(analytic.find("title"))
+    if not title and monogr:
+        title = _clean(monogr.find("title", level="m")) or _clean(monogr.find("title"))
 
-def extract_citations(pdf_path):
-    logger.info("Extracting text from %s using pdftotext…", pdf_path)
-    result = subprocess.run(["pdftotext", pdf_path, "-"], capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        logger.error("pdftotext failed: %s", result.stderr)
-        return []
+    container = None
+    if monogr:
+        journal = monogr.find("title", level="j")
+        container = _clean(journal) if journal else None
+        if container == title:
+            container = None
 
-    lines = _reference_section(result.stdout.split('\n'))
+    doi_node = bibl.find("idno", type="DOI")
+    doi = doi_node.text.strip().lower() if doi_node and doi_node.text else None
 
-    citations = []
-    current_citation = ""
-    
-    for line in lines:
-        line = line.strip()
-        
-        if not line:
-            continue
-            
-        match = _match_citation_line(line)
+    authors = []
+    scope = analytic or bibl
+    for author in scope.find_all("author"):
+        pers = author.find("persName")
+        if pers:
+            name = _person_name(pers)
+            if name:
+                authors.append(name)
+
+    year = None
+    date = bibl.find("date", type="published")
+    if date:
+        when = date.get("when") or _clean(date) or ""
+        match = re.search(r"(1[89]\d{2}|20\d{2})", when)
         if match:
-            # We found a citation marker — save the previous one
-            if current_citation:
-                citations.append(current_citation.strip())
-            
-            current_citation = line
-        elif current_citation:
-            # Continue accumulating lines for the current citation
-            # Stop if we hit something that clearly isn't part of a citation
-            # e.g., a page number or random header, usually short.
-            if len(line) < 3 and line.isdigit():
-                continue  # Likely a page number
-            
-            current_citation += " " + line
+            year = int(match.group(1))
 
-    # Save the very last citation
-    if current_citation:
-        citations.append(current_citation.strip())
-        
-    logger.info("Extracted %d citation entries from %s.", len(citations), pdf_path)
-    return citations
+    raw_node = bibl.find("note", type="raw_reference")
+    raw_reference = _clean(raw_node)
 
-def _unique_destination(directory: str, filename: str) -> str:
-    """Return a path in *directory* for *filename* that overwrites nothing.
+    return {
+        "source_file": source_file,
+        "xml_id": bibl.get("{http://www.w3.org/XML/1998/namespace}id") or bibl.get("id"),
+        "title": title,
+        "container": container,
+        "authors": authors,
+        "year": year,
+        "doi": doi,
+        "doi_confidence": _doi_confidence(title, raw_reference) if doi else None,
+        "raw_reference": raw_reference,
+    }
 
-    Two source papers can share a basename, and the previous `shutil.move`
-    replaced the earlier file without a word.
-    """
-    stem, ext = os.path.splitext(filename)
-    candidate = os.path.join(directory, filename)
-    n = 2
-    while os.path.exists(candidate):
-        candidate = os.path.join(directory, f"{stem}_{n}{ext}")
-        n += 1
-    return candidate
+
+def parse_article_metadata(soup, source_file=None):
+    """Parse the citing paper's own title, authors and DOI from the TEI header."""
+    header = soup.find("teiHeader")
+    analytic = None
+    if header:
+        source_desc = header.find("sourceDesc")
+        if source_desc:
+            bibl = source_desc.find("biblStruct")
+            if bibl:
+                analytic = bibl.find("analytic")
+
+    if analytic is None:
+        return {"source_file": source_file, "title": None, "doi": None, "authors": []}
+
+    doi_node = analytic.find("idno", type="DOI")
+    authors = []
+    for author in analytic.find_all("author"):
+        pers = author.find("persName")
+        if pers:
+            name = _person_name(pers)
+            if name:
+                authors.append(name)
+
+    return {
+        "source_file": source_file,
+        "title": _clean(analytic.find("title", type="main")) or _clean(analytic.find("title")),
+        "doi": doi_node.text.strip().lower() if doi_node and doi_node.text else None,
+        "authors": authors,
+    }
+
+
+def parse_tei_file(tei_file_path):
+    """Parse one TEI file into its article metadata and its reference list."""
+    with open(tei_file_path, "r", encoding="utf-8") as f:
+        soup = BeautifulSoup(f, "xml")
+
+    source_file = f"{_stem(tei_file_path)}.pdf"
+    article = parse_article_metadata(soup, source_file=source_file)
+
+    list_bibl = soup.find("listBibl")
+    references = []
+    if list_bibl is not None:
+        references = [
+            parse_reference(bibl, source_file=source_file)
+            for bibl in list_bibl.find_all("biblStruct")
+        ]
+
+    return article, references
+
+
+def summarise(references):
+    """Counts worth logging after a run."""
+    total = len(references)
+    with_doi = [r for r in references if r["doi"]]
+    suspect = [r for r in with_doi if r["doi_confidence"] in ("low", "unknown")]
+    return {
+        "references": total,
+        "with_doi": len(with_doi),
+        "doi_coverage": round(len(with_doi) / total, 3) if total else 0.0,
+        "suspect_doi": len(suspect),
+        "suspect_ids": [(r["source_file"], r["xml_id"]) for r in suspect],
+    }
 
 
 def run_extractor():
-    all_citations = []
-    
-    # Load existing citations to append to
-    if os.path.exists(EXTRACTED_CITATIONS_PATH):
-        try:
-            with open(EXTRACTED_CITATIONS_PATH, "r") as f:
-                all_citations = json.load(f)
-        except json.JSONDecodeError:
-            pass
+    os.makedirs(XML_OUTPUT_DIR, exist_ok=True)
 
-    processed_dir = os.path.join(RAW_DIR, "processed")
-    failed_dir = os.path.join(RAW_DIR, "failed")
-    os.makedirs(processed_dir, exist_ok=True)
-
-    pdfs_processed = 0
-    pdfs_failed = 0
-    for raw_pdf in glob.glob(os.path.join(RAW_DIR, "*.pdf")):
-        name = os.path.basename(raw_pdf)
-        citations = extract_citations(raw_pdf)
-
-        if citations:
-            all_citations.extend(citations)
-            # Move out of raw/ so the next run does not re-read it.
-            shutil.move(raw_pdf, _unique_destination(processed_dir, name))
-            pdfs_processed += 1
-        else:
-            # Nothing came out: pdftotext failed, the PDF is a scan with no text
-            # layer, or its reference list is in a format the patterns miss.
-            # Filing it under processed/ would claim a success it did not have
-            # and leave the paper silently unaccounted for, so it goes somewhere
-            # visible instead — still out of raw/, so watchers do not loop on it.
-            os.makedirs(failed_dir, exist_ok=True)
-            shutil.move(raw_pdf, _unique_destination(failed_dir, name))
-            pdfs_failed += 1
-            logger.warning(
-                "No citations extracted from %s — moved to raw/failed/. "
-                "Check that it has a text layer and a recognisable reference list.",
-                name,
-            )
-
-    if pdfs_processed == 0:
-        if pdfs_failed:
-            logger.error(
-                "%d PDF(s) yielded no citations; see raw/failed/. Nothing written.",
-                pdfs_failed,
-            )
-        else:
-            logger.info("No new PDFs found in %s.", RAW_DIR)
+    pdfs = glob.glob(os.path.join(RAW_DIR, "*.pdf"))
+    if not pdfs:
+        logger.info("No PDFs found in %s.", RAW_DIR)
         return
 
-    # Remove duplicates while maintaining some relative order
-    unique_citations = list(dict.fromkeys(all_citations))
-    
-    with open(EXTRACTED_CITATIONS_PATH, "w") as f:
-        json.dump(unique_citations, f, indent=4)
-        
+    run_grobid_batch(RAW_DIR, XML_OUTPUT_DIR)
+
+    tei_files = sorted(glob.glob(os.path.join(XML_OUTPUT_DIR, "*.xml")))
+    if not tei_files:
+        logger.error(
+            "GROBID produced no TEI in %s. Check the server is up: "
+            "curl localhost:8070/api/isalive",
+            XML_OUTPUT_DIR,
+        )
+        return
+
+    articles = []
+    references = []
+    for tei_path in tei_files:
+        try:
+            article, refs = parse_tei_file(tei_path)
+        except Exception:
+            logger.exception("Failed to parse %s", tei_path)
+            continue
+
+        articles.append(article)
+        references.extend(refs)
+
+        if not refs:
+            logger.warning("No references found in %s.", os.path.basename(tei_path))
+        else:
+            logger.info(
+                "%s: %d references, %d with DOI.",
+                os.path.basename(tei_path),
+                len(refs),
+                sum(1 for r in refs if r["doi"]),
+            )
+
+    payload = {"articles": articles, "references": references}
+    with open(EXTRACTED_CITATIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    stats = summarise(references)
     logger.info(
-        "Processed %d PDF(s)%s. Saved %d unique citations to %s",
-        pdfs_processed,
-        f" ({pdfs_failed} yielded nothing — see raw/failed/)" if pdfs_failed else "",
-        len(unique_citations),
+        "Processed %d PDF(s). %d references, %.1f%% with a DOI, %d suspect. Saved to %s",
+        len(articles),
+        stats["references"],
+        stats["doi_coverage"] * 100,
+        stats["suspect_doi"],
         EXTRACTED_CITATIONS_PATH,
     )
-    return unique_citations
+    if stats["suspect_ids"]:
+        logger.warning("DOIs worth checking by hand: %s", stats["suspect_ids"][:20])
+
 
 if __name__ == "__main__":
     run_extractor()
